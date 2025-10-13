@@ -97,8 +97,8 @@ def load_ikraph(base_path: str | Path) -> KnowledgeGraph:
             "name": node_info["official name"],
             "common_name": node_info["common name"],
             "subtype": node_info["subtype"],
-            "external_id": node_info["id"],
-            "species": node_info["species"]
+            "external_id": node_info["id"]#,
+            #"species": node_info["species"]
         }
 
         graph.add_node(node_tuple, **node_attrs)
@@ -238,14 +238,14 @@ def load_ikraph(base_path: str | Path) -> KnowledgeGraph:
 
 # Example usage
 if __name__ == "__main__":
-    base_path = Path("/scratch/fzsg/GraphDatasets/BioMedKGs/ikraph")
+    base_path = Path("/home/projects2/ContextAwareKGReasoning/data")
     raw_path = Path("raw/iKraph_full/")
 
     print("Starting iKraph loading process...")
     kg = load_ikraph(base_path / raw_path)
 
     print("Exporting..")
-    kg.export_graph(base_path / "ikraph.pkl", file_format="pickle")
+    kg.export_graph(base_path / "graphs/ikraph.pkl", file_format="pickle")
 
     print("Schema:")
     print(kg.schema)
