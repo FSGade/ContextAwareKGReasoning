@@ -10,8 +10,28 @@ from pathlib import Path
 from contextlib import redirect_stdout
 from collections import defaultdict
 from tqdm import tqdm
+import sys
+from pathlib import Path
+import trace
+
 from knowledge_graph import KnowledgeGraph, print_kg_stats
-import traceback
+
+
+# Float tolerance for tie detection
+EPS = 1e-9
+EVID_EPS = 0.01  
+
+
+def ordered_pair(u, v):
+    """
+    Return a stable ordering for undirected edges.
+    Falls back to string comparison if node keys are not orderable.
+    """
+    try:
+        return (u, v) if u <= v else (v, u)
+    except TypeError:
+        su, sv = str(u), str(v)
+        return (u, v) if su <= sv else (v, u)
 
 
 def aggregate_edge_probabilities(edges_data, min_prob=0.0):
@@ -25,7 +45,7 @@ def aggregate_edge_probabilities(edges_data, min_prob=0.0):
     Returns (probability, evidence_score, attrs) or (0, 0, None) if below threshold.
     """
     if not edges_data:
-        return 0, 0, None
+        return 0.0, 0.0, None
     
     n_edges = len(edges_data)
     
@@ -53,12 +73,13 @@ def aggregate_edge_probabilities(edges_data, min_prob=0.0):
     # P = 1 - ∏(1 - p_i) computed as 1 - exp(sum(log(1-p)))
     log_complement = np.log1p(-probs)  # More stable than log(1-p)
     final_prob = -np.expm1(np.sum(log_complement))  # More stable than 1 - exp(x)
-    
+    final_prob = float(np.clip(final_prob, 0.0, 1.0))  # clip ensures that final_prob is in [0, 1] in case of numeric drift
+
     # S = Σ -log(1 - p_i + ε)
-    evidence_score = np.sum(-np.log(1 - probs + 0.01))
+    evidence_score = np.sum(-np.log(1 - probs + EVID_EPS))
     
     if final_prob < min_prob:
-        return 0, 0, None
+        return 0.0, 0.0, None
     
     # document_ids = [e.get('document_id') for e in edges_data if e.get('document_id')]
     # sources = list(set(e.get('source') for e in edges_data if e.get('source')))
@@ -75,7 +96,7 @@ def aggregate_edge_probabilities(edges_data, min_prob=0.0):
         'is_directed': first_edge.get('direction', '0') != '0',
         'source': ', '.join(sources) if sources else 'aggregated',
         'n_supporting_edges': len(edges_data),
-        'n_documents': len(document_ids),
+        'n_documents': len(set(document_ids)),
         'aggregated': True
     }
     
@@ -89,7 +110,6 @@ def aggregate_knowledge_graph(kg, min_prob=0.0, output_path=None, conflicts_log=
     For each node pair:
     1. Aggregate edges separately by type (Association, Bind, etc.)
     2. Keep only the edge type with highest probability (use evidence score as tiebreaker)
-    3. Log conflicts where same type has different correlation_type or direction
 
     Parameters:
     ----------
@@ -128,17 +148,20 @@ def aggregate_knowledge_graph(kg, min_prob=0.0, output_path=None, conflicts_log=
         direction = data.get('direction', '0')  # Undirected by default
         
         # Normalize undirected edges
-        if direction == '0' and u > v:
-            u, v = v, u
+        # if direction == '0' and u > v:
+        #     u, v = v, u
+        if direction == '0':
+            u, v = ordered_pair(u, v) # Normalize undirected edges to a canonical order 
         
         group_key = (u, v, edge_type, correlation, direction)
         edge_groups[group_key].append(data.copy())
     
     print(f"Found {len(edge_groups):,} unique groups")
     
-    # Aggregate by type and detect conflicts
+    # Aggregate by type
     print("Aggregating by edge type...")
-    conflicts = []
+
+    # conflicts = [] --- IGNORE --- now checking conflicts in a standalone script
     aggregated_by_type = defaultdict(dict)  # (u,v) -> {edge_type: (prob, score, attrs, u, v)}
     
     for (u, v, edge_type, correlation, direction), edges_data in tqdm(edge_groups.items(), desc="Aggregating"):
@@ -155,28 +178,28 @@ def aggregate_knowledge_graph(kg, min_prob=0.0, output_path=None, conflicts_log=
         #         'directions': list(directions),
         #         'n_edges': len(edges_data)
         #     })
-        if len(edges_data) > 1:
-            first_corr = edges_data[0].get('correlation_type', 0)
-            first_dir = edges_data[0].get('direction', '0')
-            has_conflict = False
+        # if len(edges_data) > 1:
+        #     first_corr = edges_data[0].get('correlation_type', 0)
+        #     first_dir = edges_data[0].get('direction', '0')
+        #     has_conflict = False
         
-            for edge in edges_data[1:]:
-                if (edge.get('correlation_type', 0) != first_corr or 
-                    edge.get('direction', '0') != first_dir):
-                    has_conflict = True
-                    break
+        #     for edge in edges_data[1:]:
+        #         if (edge.get('correlation_type', 0) != first_corr or 
+        #             edge.get('direction', '0') != first_dir):
+        #             has_conflict = True
+        #             break
             
-            if has_conflict:
-                correlations = set(e.get('correlation_type', 0) for e in edges_data)
-                directions = set(e.get('direction', '0') for e in edges_data)
-                conflicts.append({
-                    'source': u.name,
-                    'target': v.name,
-                    'edge_type': edge_type,
-                    'correlations': list(correlations),
-                    'directions': list(directions),
-                    'n_edges': len(edges_data)
-                })
+        #     if has_conflict:
+        #         correlations = set(e.get('correlation_type', 0) for e in edges_data)
+        #         directions = set(e.get('direction', '0') for e in edges_data)
+        #         conflicts.append({
+        #             'source': u.name,
+        #             'target': v.name,
+        #             'edge_type': edge_type,
+        #             'correlations': list(correlations),
+        #             'directions': list(directions),
+        #             'n_edges': len(edges_data)
+        #         })
 
         # Aggregate this type
         prob, score, attrs = aggregate_edge_probabilities(edges_data, min_prob)
@@ -197,8 +220,7 @@ def aggregate_knowledge_graph(kg, min_prob=0.0, output_path=None, conflicts_log=
     
     for node_pair, types_dict in tqdm(aggregated_by_type.items()):
         # Find type with highest probability, use evidence score as tiebreaker
-        best_type = max(types_dict.items(), 
-                       key=lambda x: (x[1][0], x[1][1]))  # (probability, evidence_score)
+        best_type = max(types_dict.items(), key=lambda x: (x[1][0], x[1][1]))  # (probability, evidence_score)
         
         #edge_type, (prob, score, attrs, u, v) = best_type
         edge_type, (prob, score, attrs) = best_type  # Remove u, v
@@ -206,8 +228,9 @@ def aggregate_knowledge_graph(kg, min_prob=0.0, output_path=None, conflicts_log=
 
         # Check if there was a tie
         max_prob = prob
-        #tied_types = [t for t, (p, s, a, _, _) in types_dict.items() if p == max_prob]
-        tied_types = [t for t, (p, s, a) in types_dict.items() if p == max_prob]  # Remove _, _
+        # tied_types = [t for t, (p, s, a, _, _) in types_dict.items() if p == max_prob]
+        # tied_types = [t for t, (p, s, a) in types_dict.items() if p == max_prob]  # Remove _, _
+        tied_types = [t for t, (p, s, a) in types_dict.items() if abs(p - max_prob) <= EPS]
         if len(tied_types) > 1:
             n_tied += 1
         
@@ -226,10 +249,10 @@ def aggregate_knowledge_graph(kg, min_prob=0.0, output_path=None, conflicts_log=
     print(f"  Reduction: {100 * (1 - agg_kg.number_of_edges() / kg.number_of_edges()):.1f}%")
     
     if n_tied > 0:
-        print(f"  Ties resolved by evidence score: {n_tied:,}")
+        print(f"  Ties resolved by evidence score (within EPS = {EPS}): {n_tied:,}")
     
-    if conflicts:
-        print(f"\nConflicts detected: {len(conflicts):,} groups with mixed correlation/direction")
+    # if conflicts:
+    #     print(f"\nConflicts detected: {len(conflicts):,} groups with mixed correlation/direction")
     
 
     # Free memory before saving
@@ -247,23 +270,22 @@ def aggregate_knowledge_graph(kg, min_prob=0.0, output_path=None, conflicts_log=
         agg_kg.export_graph(output_path)
     
     # Save conflicts log
-    if conflicts and conflicts_log:
-        import json
-        conflicts_log = Path(conflicts_log)
-        with open(conflicts_log, 'w') as f:
-            json.dump(conflicts, f, indent=2)
-        print(f"Conflicts log: {conflicts_log}")
+    # if conflicts and conflicts_log:
+    #     import json
+    #     conflicts_log = Path(conflicts_log)
+    #     with open(conflicts_log, 'w') as f:
+    #         json.dump(conflicts, f, indent=2)
+    #     print(f"Conflicts log: {conflicts_log}")
     
-    return agg_kg, conflicts
+    return agg_kg
 
 
 def main():
-    base_path = Path("/home/projects2/ContextAwareKGReasoning/data")
-    input_graph = base_path / "graphs/prototypes/prototype_8seeds_12nodes.pkl"
-    output_graph = base_path / "graphs/subsets/prototype_8_12_aggregated.pkl"
-    output_info = base_path / "graphs/info"
-    output_viz = base_path / "graphs/visualizations"
-    conflicts_log = output_info / "prototype_8_12_aggregation_conflicts.json"
+    base_path = Path("/home/projects2/ContextAwareKGReasoning")
+    input_graph = base_path / "data/graphs/prototypes/prototype_8seeds_12nodes.pkl"
+    output_graph = base_path / "data/graphs/subsets/prototype_8_12_aggregated.pkl"
+    output_info = base_path / "data/graphs/info"
+    output_viz = base_path / "results/graph_viz"
     
     min_probability = 0.001
     
@@ -275,11 +297,10 @@ def main():
     print("Loading graph...")
     kg = KnowledgeGraph.import_graph(input_graph)
     
-    agg_kg, conflicts = aggregate_knowledge_graph(
+    agg_kg = aggregate_knowledge_graph(
         kg, 
         min_prob=min_probability,
-        output_path=output_graph,
-        conflicts_log=conflicts_log
+        output_path=output_graph
     )
     
     print("\n" + "="*80)
@@ -295,8 +316,8 @@ def main():
         with redirect_stdout(f):
             print_kg_stats(agg_kg)
 
-    if conflicts:
-        print(f"\n Review conflicts: {conflicts_log}")
+    # if conflicts:
+    #     print(f"\n Review conflicts: {conflicts_log}")
 
     # Visualize graph if n nodes < 1000
     if agg_kg.number_of_nodes() < 1000:
@@ -317,6 +338,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"\nError: {e}")
-        import traceback
         traceback.print_exc()
         sys.exit(1)
