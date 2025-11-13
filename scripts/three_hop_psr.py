@@ -1,6 +1,6 @@
 """
-Perform two-hop PSR inference on an aggregated subgraph (MultiDiGraph-safe).
-Infers indirect associations A -> Bj -> C following the PSR algorithm.
+Perform three-hop PSR inference on an aggregated subgraph (MultiDiGraph-safe).
+Infers indirect associations A -> B -> C -> D following the PSR algorithm.
 Edges are already aggregated before subsetting.
 """
 
@@ -29,12 +29,10 @@ def node_type(kg, n):
     """Get a semantic type/kind for node n."""
     return kg.nodes[n].get('type', kg.nodes[n].get('kind', 'unknown'))
 
-
 def get_edge_properties(kg, u, v):
     """
     Extract probability, evidence_score, sign, type, and direction for an aggregated edge.
-    MultiDiGraph-safe: if get_edge_data returns {key -> attrs}, prefer aggregated=True;
-    otherwise take the one with highest evidence_score.
+    MultiDiGraph-safe: if get_edge_data returns {key -> attrs}, prefer aggregated=True.
     """
     data = kg.get_edge_data(u, v)
     if data is None:
@@ -53,11 +51,9 @@ def get_edge_properties(kg, u, v):
     if edge_data is None:
         return None
 
-    # Use canonical keys produced by aggregate.py / dataset_ikraph.py
-    prob = edge_data.get('probability', 0.0)                     # <- default to 0.0
+    prob = edge_data.get('probability', 0.0)
     evidence_score = edge_data.get('evidence_score', 0.0)
     correlation_type = edge_data.get('correlation_type', 0)
-
     edge_type = edge_data.get('type', edge_data.get('kind', 'unknown'))
     direction = edge_data.get('direction', '1')
     is_directed = (direction != '0')
@@ -72,22 +68,16 @@ def get_edge_properties(kg, u, v):
         'n_documents': edge_data.get('n_documents', 1),
     }
 
-
-
-def has_confident_direct(kg, A, C, require_directed=True, require_known_sign=True):
+def has_confident_direct(kg, A, D, require_directed=True, require_known_sign=True):
     """
-    Returns True if there exists a direct A->C edge that is 'confident':
-      - If require_directed: direction != '0'
-      - If require_known_sign: correlation_type != 0
-    MultiDiGraph-safe.
+    Returns True if there exists a direct A->D edge that is 'confident'.
     """
-    if not kg.has_edge(A, C):
+    if not kg.has_edge(A, D):
         return False
-    data = kg.get_edge_data(A, C)
+    data = kg.get_edge_data(A, D)
     if data is None:
         return False
 
-    # Normalize to iterable of attribute dicts
     if isinstance(data, dict) and any(isinstance(v, dict) for v in data.values()):
         records = list(data.values())
     else:
@@ -102,40 +92,40 @@ def has_confident_direct(kg, A, C, require_directed=True, require_known_sign=Tru
 
 
 # -------------------------------
-# Core algorithm
+# Core algorithm: 3-hop inference
 # -------------------------------
 
-def compute_two_hop_inference(
+def compute_three_hop_inference(
     kg,
     max_intermediates=None,
-    min_path_probability=0.01,
+    min_path_probability=0.001,
     consider_undirected=False,
     skip_when_any_direct_exists=True,
     require_directed_for_skip=True,
     require_known_sign_for_skip=True,
 ):
     """
-    Compute two-hop inferences A -> Bj -> C for all paths in the graph.
+    Compute three-hop inferences A -> B -> C -> D for all paths in the graph.
 
     Args:
         kg: Knowledge graph (MultiDiGraph-compatible)
-        max_intermediates: Max # of Bj to consider per (A,C); if None, unlimited
-        min_path_probability: Minimum P(A->Bj)*P(Bj->C) to accept a path
+        max_intermediates: Max # of (B,C) pairs to consider per (A,D); if None, unlimited
+        min_path_probability: Minimum P(A->B)*P(B->C)*P(C->D) to accept a path
         consider_undirected: If True, traverse edges with direction == '0' both ways
-        skip_when_any_direct_exists: If True, skip inferring A->C if a direct edge
+        skip_when_any_direct_exists: If True, skip inferring A->D if a direct edge
                                      already exists (subject to require_* flags)
         require_directed_for_skip: If True, only skip when the direct edge is directed
         require_known_sign_for_skip: If True, only skip when direct edge has known sign
 
     Returns:
-        inferred_edges: Dict keyed by (A, C) with inference details.
+        inferred_edges: Dict keyed by (A, D) with inference details.
     """
     print(f"\n{'='*80}")
-    print("COMPUTING TWO-HOP PSR INFERENCE")
+    print("COMPUTING THREE-HOP PSR INFERENCE")
     print(f"{'='*80}")
     print(f"  Nodes: {kg.number_of_nodes():,}")
     print(f"  Direct edges: {kg.number_of_edges():,}")
-    print(f"  Max intermediates per pair: {max_intermediates or 'unlimited'}")
+    print(f"  Max intermediate pairs per (A,D): {max_intermediates or 'unlimited'}")
     print(f"  Min path probability: {min_path_probability}")
     print(f"  Consider undirected edges: {consider_undirected}")
     print(f"  Skip when any direct exists: {skip_when_any_direct_exists} "
@@ -161,85 +151,114 @@ def compute_two_hop_inference(
                 predecessors_dict[u].add(v)
                 predecessors_dict[v].add(u)
 
-    # Find all two-hop paths structurally
-    print("\nFinding two-hop paths...")
-    two_hop_paths = defaultdict(list)
+    # Find all three-hop paths structurally
+    print("\nFinding three-hop paths...")
+    
+    # Progress estimate: count B nodes that have both predecessors and successors
+    active_B_nodes = [
+        B for B in kg.nodes()
+        if predecessors_dict.get(B) and successors_dict.get(B)
+    ]
+    print(f"Processing {len(active_B_nodes):,} B nodes with both predecessors and successors")
+    
+    three_hop_paths = defaultdict(list)
 
-    for Bj in tqdm(kg.nodes(), desc="Processing intermediates"):
-        preds = predecessors_dict.get(Bj, set())
-        succs = successors_dict.get(Bj, set())
+    for B in tqdm(active_B_nodes, desc="Processing B nodes"):
+        preds_B = predecessors_dict.get(B, set())
+        succs_B = successors_dict.get(B, set())
 
-        for A in preds:
-            for C in succs:
-                if A == C:
+        for C in succs_B:
+            if B == C:
+                continue
+
+            succs_C = successors_dict.get(C, set())
+            if not succs_C:
+                continue
+
+            for A in preds_B:
+                if A == C or A == B:
                     continue
 
-                if skip_when_any_direct_exists:
-                    if has_confident_direct(
-                        kg, A, C,
-                        require_directed=require_directed_for_skip,
-                        require_known_sign=require_known_sign_for_skip
-                    ):
+                for D in succs_C:
+                    if D == A or D == B or D == C:
                         continue
 
-                two_hop_paths[(A, C)].append(Bj)
+                    if skip_when_any_direct_exists:
+                        if has_confident_direct(
+                            kg, A, D,
+                            require_directed=require_directed_for_skip,
+                            require_known_sign=require_known_sign_for_skip
+                        ):
+                            continue
 
-    print(f"Found {len(two_hop_paths):,} A-C pairs with two-hop paths")
-    total_paths = sum(len(interms) for interms in two_hop_paths.values())
-    print(f"Total two-hop paths: {total_paths:,}")
+                    # Record this three-hop path: A -> B -> C -> D
+                    three_hop_paths[(A, D)].append((B, C))
+
+    print(f"Found {len(three_hop_paths):,} A-D pairs with three-hop paths")
+    total_paths = sum(len(interms) for interms in three_hop_paths.values())
+    print(f"Total three-hop paths: {total_paths:,}")
 
     # Compute inferred edges using PSR equations
     print("\nComputing inferred probabilities and scores...")
     inferred_edges = {}
     skipped_paths = 0
 
-    for (A, C), intermediates in tqdm(two_hop_paths.items(), desc="Computing inferences"):
+    for (A, D), intermediate_pairs in tqdm(three_hop_paths.items(), desc="Computing inferences"):
         # If limiting intermediates, rank by product of evidence scores
-        if max_intermediates and len(intermediates) > max_intermediates:
+        if max_intermediates and len(intermediate_pairs) > max_intermediates:
             scored = []
-            for Bj in intermediates:
-                props_ab = get_edge_properties(kg, A, Bj)
-                props_bc = get_edge_properties(kg, Bj, C)
-                if props_ab and props_bc:
-                    scored.append((Bj, props_ab['evidence_score'] * props_bc['evidence_score']))
+            for (B, C) in intermediate_pairs:
+                props_ab = get_edge_properties(kg, A, B)
+                props_bc = get_edge_properties(kg, B, C)
+                props_cd = get_edge_properties(kg, C, D)
+                if props_ab and props_bc and props_cd:
+                    scored.append((
+                        (B, C),
+                        props_ab['evidence_score'] * props_bc['evidence_score'] * props_cd['evidence_score']
+                    ))
             scored.sort(key=lambda x: -x[1])
-            intermediates = [b for b, _ in scored[:max_intermediates]]
+            intermediate_pairs = [pair for pair, _ in scored[:max_intermediates]]
 
         path_probabilities = []
         path_evidence_scores = []
         path_correlations = []
         path_details = []
 
-        for Bj in intermediates:
-            props_ab = get_edge_properties(kg, A, Bj)
-            props_bc = get_edge_properties(kg, Bj, C)
-            if props_ab is None or props_bc is None:
+        for (B, C) in intermediate_pairs:
+            props_ab = get_edge_properties(kg, A, B)
+            props_bc = get_edge_properties(kg, B, C)
+            props_cd = get_edge_properties(kg, C, D)
+            if props_ab is None or props_bc is None or props_cd is None:
                 continue
 
-            path_prob = props_ab['probability'] * props_bc['probability']
+            path_prob = props_ab['probability'] * props_bc['probability'] * props_cd['probability']
 
             # Filter low-probability paths here
             if path_prob < min_path_probability:
                 skipped_paths += 1
                 continue
 
-            path_evidence = props_ab['evidence_score'] * props_bc['evidence_score']
-            path_correlation = props_ab['correlation_type'] * props_bc['correlation_type']
+            path_evidence = props_ab['evidence_score'] * props_bc['evidence_score'] * props_cd['evidence_score']
+            path_correlation = props_ab['correlation_type'] * props_bc['correlation_type'] * props_cd['correlation_type']
 
             path_probabilities.append(path_prob)
             path_evidence_scores.append(path_evidence)
             path_correlations.append(path_correlation)
 
             path_details.append({
-                'intermediate': node_name(kg, Bj),
-                'intermediate_type': node_type(kg, Bj),
+                'intermediate_B': node_name(kg, B),
+                'intermediate_B_type': node_type(kg, B),
+                'intermediate_C': node_name(kg, C),
+                'intermediate_C_type': node_type(kg, C),
                 'probability': round(float(path_prob), 6),
                 'evidence_score': round(float(path_evidence), 4),
                 'correlation_type': int(path_correlation),
                 'edge_ab_type': props_ab['edge_type'],
                 'edge_bc_type': props_bc['edge_type'],
+                'edge_cd_type': props_cd['edge_type'],
                 'n_supporting_ab': props_ab['n_supporting_edges'],
                 'n_supporting_bc': props_bc['n_supporting_edges'],
+                'n_supporting_cd': props_cd['n_supporting_edges'],
             })
 
         if not path_probabilities:
@@ -260,16 +279,16 @@ def compute_two_hop_inference(
         else:
             combined_correlation = 0
 
-        inferred_edges[(A, C)] = {
+        inferred_edges[(A, D)] = {
             'source': node_name(kg, A),
             'source_type': node_type(kg, A),
-            'target': node_name(kg, C),
-            'target_type': node_type(kg, C),
+            'target': node_name(kg, D),
+            'target_type': node_type(kg, D),
             'probability': round(float(combined_prob), 6),
             'evidence_score': round(float(combined_evidence), 4),
             'correlation_type': int(combined_correlation),
             'num_paths': len(path_probabilities),
-            'num_intermediates_tested': len(intermediates),
+            'num_intermediate_pairs_tested': len(intermediate_pairs),
             'paths': sorted(path_details, key=lambda x: -x['evidence_score'])[:50],
         }
 
@@ -291,58 +310,51 @@ def compute_two_hop_inference(
 
         print(f"\nPaths per inference:")
         print(f"  Min: {min(num_paths)}, Max: {max(num_paths)}, Mean: {np.mean(num_paths):.1f}")
-
-        corr_counts = defaultdict(int)
-        for e in inferred_edges.values():
-            corr_counts[e['correlation_type']] += 1
-        print(f"\nCorrelation type distribution:")
-        total = len(inferred_edges)
-        print(f"  Positive (+1): {corr_counts[1]:,} ({100*corr_counts[1]/total:.1f}%)")
-        print(f"  Negative (-1): {corr_counts[-1]:,} ({100*corr_counts[-1]/total:.1f}%)")
-        print(f"  Unknown (0): {corr_counts[0]:,} ({100*corr_counts[0]/total:.1f}%)")
+        print(f"  Median: {np.median(num_paths):.0f}")
 
     return inferred_edges
 
 
-def create_inferred_graph(kg, inferred_edges, min_probability=0.1, min_evidence=1.0):
+# -------------------------------
+# Create combined graph with inferred edges
+# -------------------------------
+
+def create_inferred_graph(kg, inferred_edges, min_probability=0.0, min_evidence=0.0):
     """
-    Create a new graph with both direct and inferred edges, thresholded by
-    min_probability & min_evidence on the aggregated inference.
+    Create new graph with both direct and inferred edges.
     """
     print(f"\n{'='*80}")
-    print("CREATING GRAPH WITH INFERRED EDGES")
+    print("CREATING COMBINED GRAPH")
     print(f"{'='*80}")
-    print(f"  Min probability: {min_probability}")
-    print(f"  Min evidence score: {min_evidence}")
 
-    inferred_kg = kg.__class__(schema=kg.schema)
+    # Copy original graph
+    inferred_kg = kg.copy()
 
-    for node in tqdm(kg.nodes(), desc="Adding nodes"):
-        inferred_kg.add_node(node, **kg.nodes[node])
+    # Count existing edges
+    direct_count = inferred_kg.number_of_edges()
+    print(f"Original edges: {direct_count:,}")
 
-    direct_count = 0
-    for u, v, data in tqdm(kg.edges(data=True), desc="Adding direct edges"):
-        inferred_kg.add_edge(u, v, **data)
-        direct_count += 1
-
+    # Add inferred edges
     added_count = 0
     filtered_count = 0
 
-    for (A, C), data in tqdm(inferred_edges.items(), desc="Adding inferred edges"):
+    print(f"\nAdding inferred edges...")
+    print(f"Filters: min_probability={min_probability}, min_evidence={min_evidence}")
+
+    for (A, D), data in tqdm(inferred_edges.items(), desc="Adding edges"):
         if data['probability'] >= min_probability and data['evidence_score'] >= min_evidence:
             inferred_kg.add_edge(
-                A, C,
-                type='inferred_two_hop',
-                kind='inferred_two_hop',
+                A, D,
+                type='inferred_three_hop',
+                kind='inferred_three_hop',
                 probability=data['probability'],
                 evidence_score=data['evidence_score'],
                 correlation_type=data['correlation_type'],
-                direction='1',  # Inferred edges are directed A->C
+                direction='1',
                 num_paths=data['num_paths'],
-                num_intermediates=data['num_intermediates_tested'],
                 aggregated=False,
                 inferred=True,
-                source='PSR_inference',
+                source='PSR_three_hop_inference',
             )
             added_count += 1
         else:
@@ -359,17 +371,21 @@ def create_inferred_graph(kg, inferred_edges, min_probability=0.1, min_evidence=
     return inferred_kg
 
 
+# -------------------------------
+# Save outputs (JSON + PKL + stats)
+# -------------------------------
+
 def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
-    """Save outputs with consistent, truthful metadata."""
+    """Save outputs with metadata."""
     input_stem = input_path.stem
 
     print(f"\nSaving inferred edges...")
-    output_json = output_dir / f"{input_stem}_inferred_edges.json"
+    output_json = output_dir / f"{input_stem}_three_hop_inferred_edges.json"
 
-    # Sort by probability and save top N (cap for convenience)
+    # Sort by probability and save top N
     max_to_save = min(5000, len(inferred_edges))
     inferred_list = []
-    for (A, C), data in sorted(inferred_edges.items(),
+    for (A, D), data in sorted(inferred_edges.items(),
                                key=lambda x: -x[1]['probability'])[:max_to_save]:
         inferred_list.append(data)
 
@@ -379,14 +395,14 @@ def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
                 'source_graph': str(input_path),
                 'num_total_inferred': len(inferred_edges),
                 'num_saved': len(inferred_list),
-                **params,  # record exactly what was used
+                **params,
             },
             'inferred_edges': inferred_list
         }, f, indent=2)
     print(f"Saved top {len(inferred_list):,} inferences to JSON")
 
     # Save combined graph
-    output_pkl = output_dir / f"{input_stem}_with_inferred.pkl"
+    output_pkl = output_dir / f"{input_stem}_three_hop_with_inferred.pkl"
     print(f"\nSaving combined graph...")
     inferred_kg.export_graph(output_pkl)
 
@@ -394,76 +410,160 @@ def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
     info_dir = output_dir.parent.parent / "info"
     info_dir.mkdir(parents=True, exist_ok=True)
 
-    schema_file = info_dir / f"{input_stem}_with_inferred_schema.txt"
+    schema_file = info_dir / f"{input_stem}_three_hop_with_inferred_schema.txt"
     with open(schema_file, 'w') as f:
         f.write(str(inferred_kg.schema))
 
-    stats_file = info_dir / f"{input_stem}_with_inferred_stats.txt"
+    stats_file = info_dir / f"{input_stem}_three_hop_with_inferred_stats.txt"
     with open(stats_file, 'w') as f:
         with redirect_stdout(f):
             print_kg_stats(inferred_kg)
 
     # Visualize if small
-    if inferred_kg.number_of_nodes() < 1000:
+    if inferred_kg.number_of_nodes() < 500:
         print(f"\nCreating visualizations...")
         viz_dir = output_dir.parent.parent / "results" / "graph_viz"
         viz_dir.mkdir(parents=True, exist_ok=True)
 
-        output_html = viz_dir / f"{input_stem}_with_inferred.html"
+        output_html = viz_dir / f"{input_stem}_three_hop_with_inferred.html"
         inferred_kg.visualize(
             str(output_html),
-            title=f"{input_stem.replace('_', ' ').title()} + Inferred"
+            title=f"{input_stem.replace('_', ' ').title()} + Three-Hop Inferred"
         )
-
-        output_png = viz_dir / f"{input_stem}_with_inferred.png"
-        inferred_kg.visualize(
-            str(output_png),
-            figsize=(20, 15),
-            node_size=500,
-            font_size=5
-        )
-
-        
-        print(f"Saved visualizations")
+        print(f"Saved visualization")
     else:
         print(f"\nSkipping visualization (graph has {inferred_kg.number_of_nodes():,} nodes)")
 
     return output_json, output_pkl
 
 
+# -------------------------------
+# Comparison utility
+# -------------------------------
+
+def compare_two_hop_and_three_hop(two_hop_graph_path, three_hop_graph_path):
+    """
+    Load both graphs and compare 2-hop vs 3-hop inferred edges.
+    
+    Args:
+        two_hop_graph_path: Path to graph with 2-hop inferences
+        three_hop_graph_path: Path to graph with 3-hop inferences
+    """
+    print(f"\n{'='*80}")
+    print("COMPARING 2-HOP vs 3-HOP INFERENCES")
+    print(f"{'='*80}")
+    
+    # Load both graphs
+    print(f"\nLoading 2-hop graph: {two_hop_graph_path}")
+    kg_2hop = KnowledgeGraph.import_graph(str(two_hop_graph_path))
+    
+    print(f"Loading 3-hop graph: {three_hop_graph_path}")
+    kg_3hop = KnowledgeGraph.import_graph(str(three_hop_graph_path))
+    
+    # Extract inferred edges from each
+    inferred_2hop = set()
+    for u, v, data in kg_2hop.edges(data=True):
+        if data.get('type') == 'inferred_two_hop' or data.get('inferred'):
+            inferred_2hop.add((
+                kg_2hop.nodes[u].get('name', str(u)),
+                kg_2hop.nodes[v].get('name', str(v))
+            ))
+    
+    inferred_3hop = set()
+    for u, v, data in kg_3hop.edges(data=True):
+        if data.get('type') == 'inferred_three_hop' or data.get('inferred'):
+            inferred_3hop.add((
+                kg_3hop.nodes[u].get('name', str(u)),
+                kg_3hop.nodes[v].get('name', str(v))
+            ))
+    
+    # Comparison
+    overlap = inferred_2hop & inferred_3hop
+    only_2hop = inferred_2hop - inferred_3hop
+    only_3hop = inferred_3hop - inferred_2hop
+    
+    print(f"\n{'='*80}")
+    print("COMPARISON RESULTS")
+    print(f"{'='*80}")
+    print(f"\n2-hop inferences: {len(inferred_2hop):,}")
+    print(f"3-hop inferences: {len(inferred_3hop):,}")
+    print(f"\nOverlap: {len(overlap):,} edges")
+    if len(inferred_2hop) > 0:
+        print(f"  ({len(overlap)/len(inferred_2hop)*100:.1f}% of 2-hop inferences)")
+    
+    print(f"\nOnly in 2-hop: {len(only_2hop):,} edges")
+    if only_2hop:
+        print(f"  Sample: {list(only_2hop)[:3]}")
+    
+    print(f"\nOnly in 3-hop: {len(only_3hop):,} edges")
+    if len(inferred_2hop) > 0:
+        print(f"  (+{len(only_3hop)/len(inferred_2hop)*100:.1f}% new inferences)")
+    if only_3hop:
+        print(f"  Sample: {list(only_3hop)[:3]}")
+    
+    # Node type breakdown for new 3-hop inferences
+    if only_3hop and kg_3hop:
+        print(f"\nNew 3-hop inferences by source-target type:")
+        type_counts = defaultdict(int)
+        for source_name, target_name in only_3hop:
+            # Find nodes by name
+            source_node = None
+            target_node = None
+            for n, data in kg_3hop.nodes(data=True):
+                if data.get('name') == source_name:
+                    source_node = n
+                if data.get('name') == target_name:
+                    target_node = n
+            
+            if source_node and target_node:
+                src_type = node_type(kg_3hop, source_node)
+                tgt_type = node_type(kg_3hop, target_node)
+                type_counts[(src_type, tgt_type)] += 1
+        
+        for (src_type, tgt_type), count in sorted(type_counts.items(), key=lambda x: -x[1])[:10]:
+            print(f"  {src_type} → {tgt_type}: {count:,}")
+    
+    return {
+        'two_hop': len(inferred_2hop),
+        'three_hop': len(inferred_3hop),
+        'overlap': len(overlap),
+        'only_2hop': len(only_2hop),
+        'only_3hop': len(only_3hop),
+    }
+
+
+# -------------------------------
+# Main
+# -------------------------------
+
 def main():
-    # -----------------------------
-    # Configuration (edit here)
-    # -----------------------------
+    """Example usage of three-hop PSR inference."""
     base_path = Path("/home/projects2/ContextAwareKGReasoning/data")
 
-    # Choose graph
+    # Input graph
     input_dir = base_path / "graphs/subsets"
     input_graph = input_dir / "prototype_8_12_aggregated.pkl"
-    # For full subgraph:
-    # input_dir = base_path / "graphs/subsets/ikraph"
-    # input_graph = input_dir / "adipose_inflammation_snn_expanded.pkl"
 
     output_dir = input_dir / "inferred"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parameters (kept in one dict and threaded everywhere)
+    # Parameters
     params = dict(
-        max_intermediates=None,        # e.g., 100
-        min_path_probability=0.001,     # filter weak paths
-        consider_undirected=False,     # treat undirected edges as bidirectional
-        skip_when_any_direct_exists=True,  # skip if confident direct A->C exists
-        require_directed_for_skip=False, # only skip if direct edge is directed, so directed = '0' won't block
+        max_intermediates=None,        # No limit on intermediate pairs
+        min_path_probability=0.001,    # Filter weak paths
+        consider_undirected=False,     # Only directed edges
+        skip_when_any_direct_exists=True,
+        require_directed_for_skip=False, 
         require_known_sign_for_skip=False,
 
-        # thresholds for adding inferred edges into final graph
-        min_inference_probability=0.0,
+        # Thresholds for adding to final graph
+        min_inference_probability=0.001,
         min_inference_evidence=0.0,
     )
 
     print("=" * 80)
-    print("TWO-HOP PSR INFERENCE")
-    print("Edges are pre-aggregated from literature mentions")
+    print("THREE-HOP PSR INFERENCE")
+    print("Extends two-hop to three-hop: A -> B -> C -> D")
     print("=" * 80)
     print(f"Input: {input_graph.name}")
     print(f"Output directory: {output_dir}")
@@ -472,14 +572,8 @@ def main():
     kg = KnowledgeGraph.import_graph(str(input_graph))
     print(f"Loaded: {kg.number_of_nodes():,} nodes, {kg.number_of_edges():,} edges")
 
-    # Sanity: check aggregated flag presence in some edges
-    sample_edges = list(kg.edges(data=True))[:5]
-    has_aggregated = any('aggregated' in data for _, _, data in sample_edges)
-    if not has_aggregated:
-        print("\nWARNING: Graph edges may not be aggregated. Run aggregate.py first for best results.")
-
     # Run inference
-    inferred_edges = compute_two_hop_inference(
+    inferred_edges = compute_three_hop_inference(
         kg,
         max_intermediates=params['max_intermediates'],
         min_path_probability=params['min_path_probability'],
@@ -490,10 +584,7 @@ def main():
     )
 
     if not inferred_edges:
-        print("\nNo inferences found. This could mean:")
-        print("  - All possible indirect paths already have confident direct edges)")
-        print("  - No valid two-hop paths with probability >= min_path_probability")
-        print("  - Edge probabilities missing/low and filtered out")
+        print("\nNo inferences found.")
         return
 
     inferred_kg = create_inferred_graph(
@@ -515,34 +606,15 @@ def main():
     print("\n" + "=" * 80)
     print("INFERENCE COMPLETE")
     print("=" * 80)
-
-    print(f"\nOriginal graph:")
-    print(f"  Nodes: {kg.number_of_nodes():,}")
-    print(f"  Edges: {kg.number_of_edges():,}")
-
-    print(f"\nInference results:")
-    print(f"  Potential inferences found: {len(inferred_edges):,}")
-    print(f"  Inferences above threshold: {sum(1 for e in inferred_edges.values() if e['probability'] >= params['min_inference_probability'] and e['evidence_score'] >= params['min_inference_evidence']):,}")
-
-    print(f"\nCombined graph:")
-    print(f"  Nodes: {inferred_kg.number_of_nodes():,}")
-    print(f"  Total edges: {inferred_kg.number_of_edges():,}")
-
-    edge_types = defaultdict(int)
-    for _, _, data in inferred_kg.edges(data=True):
-        edge_types[data.get('type', 'unknown')] += 1
-
-    print(f"\nEdge type breakdown:")
-    for etype, count in sorted(edge_types.items()):
-        print(f"  {etype}: {count:,}")
-
     print(f"\nOutput files:")
-    print(f"  - {Path(output_json).name} (inferred edges JSON)")
-    print(f"  - {Path(output_pkl).name} (combined graph)")
-
-    if inferred_kg.number_of_nodes() < 1000:
-        print(f"  - Visualizations in graphs/visualizations/")
-    print(f"  - Schema and stats in graphs/info/")
+    print(f"  - {Path(output_json).name}")
+    print(f"  - {Path(output_pkl).name}")
+    
+    # Optional: Compare with 2-hop if available
+    two_hop_graph = input_dir / "inferred" / f"{input_graph.stem}_with_inferred.pkl"
+    if two_hop_graph.exists():
+        print(f"\n2-hop graph found, running comparison...")
+        compare_two_hop_and_three_hop(two_hop_graph, output_pkl)
 
 
 if __name__ == "__main__":
