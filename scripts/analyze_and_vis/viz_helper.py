@@ -1,9 +1,16 @@
-from math import inf
-import matplotlib.pyplot as plt
-import networkx as nx
+"""
+Static graph visualization with separate styling for direct, 2-hop, and 3-hop edges.
+"""
+
+import colorsys
 import sys
 import traceback
+from math import inf
 from pathlib import Path
+
+import matplotlib.lines as mlines
+import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -41,7 +48,6 @@ def visualize_static(
     # Node colors by type (simple deterministic palette)
     node_types = {n.type for n in G.nodes()}
     def _hsv(i, n):
-        import colorsys
         return colorsys.hsv_to_rgb(i / max(1, n), 0.7, 0.9)
     color_map = {t: _hsv(i, len(node_types)) for i, t in enumerate(sorted(node_types))}
     node_colors = [color_map[n.type] for n in G.nodes()]
@@ -155,7 +161,6 @@ def visualize_static(
             )
 
     # Legend
-    import matplotlib.lines as mlines
     node_handles = [
         mlines.Line2D([0], [0], marker="o", color="w", markerfacecolor=color_map[t], label=t, markersize=10)
         for t in sorted(node_types)
@@ -180,12 +185,12 @@ def main():
     input_dir = base_path / "data/graphs"
     prot_graph = input_dir / "prototypes/prototype_8seeds_12nodes.pkl"
     aggr_graph = input_dir / "subsets/prototype_8_12_aggregated.pkl"
-    two_hop_inferred = input_dir / "subsets/inferred/prototype_8_12_aggregated_with_inferred.pkl"
-    three_hop_inferred = input_dir / "subsets/inferred/prototype_8_12_aggregated_three_hop_with_inferred.pkl"
+    two_hop_inferred = input_dir / "subsets/inferred_metapath_mechanistic/prototype_8_12_aggregated_metapath_mechanistic_split_with_inferred.pkl"
+    three_hop_inferred = input_dir / "subsets/inferred_metapath_mechanistic/prototype_8_12_aggregated_three_hop_with_inferred.pkl"
     combined_inferred = input_dir / "subsets/inferred/prototype_8_12_aggregated_combined_inferred.pkl"
 
     # Output
-    output_dir = base_path / "results/graph_viz/without_undir_3/"
+    output_dir = base_path / "results/graph_viz/prototype_mechanistic/"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Load graphs
@@ -194,23 +199,23 @@ def main():
     
     if prot_graph.exists():
         graphs["Prototype Graph"] = KnowledgeGraph.import_graph(str(prot_graph))
-        print(f"✓ Loaded prototype graph")
+        print(f"Loaded prototype graph")
     
     if aggr_graph.exists():
         graphs["Aggregated Graph"] = KnowledgeGraph.import_graph(str(aggr_graph))
-        print(f"✓ Loaded aggregated graph")
+        print(f"Loaded aggregated graph")
     
     if two_hop_inferred.exists():
         graphs["2-Hop Inferred"] = KnowledgeGraph.import_graph(str(two_hop_inferred))
-        print(f"✓ Loaded 2-hop inferred graph")
+        print(f"Loaded 2-hop inferred graph")
     
     if three_hop_inferred.exists():
         graphs["3-Hop Inferred"] = KnowledgeGraph.import_graph(str(three_hop_inferred))
-        print(f"✓ Loaded 3-hop inferred graph")
+        print(f"Loaded 3-hop inferred graph")
     
     if combined_inferred.exists():
         graphs["Combined Inferred (2-hop + 3-hop)"] = KnowledgeGraph.import_graph(str(combined_inferred))
-        print(f"✓ Loaded combined inferred graph")
+        print(f"Loaded combined inferred graph")
     
     if not graphs:
         print("ERROR: No graphs found!")

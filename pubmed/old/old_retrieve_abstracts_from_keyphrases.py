@@ -12,7 +12,7 @@ from Bio import Entrez
 from utils.pubmed_search import search_keyphrase
 
 ############# Entrez part #########
-Entrez.email = "fzsg@novonordisk.com"
+Entrez.email = "email@example.com"
 
 KEYWORD_PATH = "keyword/path/"
 REVIEW_PATH = "review/path/"
@@ -99,7 +99,7 @@ corpus_df = pd.DataFrame(
         "Day",
     ],
 )
-
+ 
 
 corpus_df.drop_duplicates("PMID", inplace=True)
 corpus_df.drop_duplicates("DOI", inplace=True)

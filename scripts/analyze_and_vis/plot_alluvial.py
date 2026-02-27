@@ -1,3 +1,8 @@
+"""
+Generate alluvial (Sankey) diagrams showing knowledge graph composition changes
+across processing stages (raw → filtered → aggregated → inferred).
+"""
+
 import plotly.graph_objects as go
 import re
 from pathlib import Path
@@ -143,127 +148,7 @@ class AlluvialDiagramGenerator:
         
         return f'rgba({r}, {g}, {b}, 0.4)'
     
-    # def _prepare_sankey_data(self, data_type: str = 'nodes', 
-    #                     top_n: Optional[int] = None) -> Tuple:
-    #     """
-    #     Prepare data for Sankey diagram with hidden sink node for proper sizing.
-        
-    #     Args:
-    #         data_type: 'nodes' or 'edges'
-    #         top_n: Show only top N categories (None for all)
-    #     """
-    #     # Collect all data
-    #     all_data = []
-    #     for parser in self.parsers:
-    #         if data_type == 'nodes':
-    #             all_data.append(parser.get_nodes())
-    #         else:
-    #             all_data.append(parser.get_edges())
-        
-    #     # Get all unique categories
-    #     all_categories = set()
-    #     for data in all_data:
-    #         all_categories.update(data.keys())
-        
-    #     # Filter to top N if specified
-    #     if top_n:
-    #         category_totals = {cat: sum(data.get(cat, 0) for data in all_data) 
-    #                         for cat in all_categories}
-    #         top_categories = sorted(category_totals.items(), 
-    #                             key=lambda x: x[1], 
-    #                             reverse=True)[:top_n]
-    #         all_categories = {cat for cat, _ in top_categories}
-            
-    #         for i, data in enumerate(all_data):
-    #             other_count = sum(count for cat, count in data.items() 
-    #                             if cat not in all_categories)
-    #             if other_count > 0:
-    #                 all_data[i]['Other'] = other_count
-    #         all_categories.add('Other')
-        
-    #     # Sort categories by total count (descending)
-    #     category_totals = {cat: sum(data.get(cat, 0) for data in all_data) 
-    #                     for cat in all_categories}
-    #     all_categories = sorted(all_categories, key=lambda x: category_totals[x], reverse=True)
-        
-    #     # Create node labels
-    #     node_labels = []
-    #     node_map = {}
-    #     node_idx = 0
-        
-    #     # Add actual subset nodes
-    #     for i, label in enumerate(self.labels):
-    #         for category in all_categories:
-    #             node_labels.append(f"{category}")
-    #             node_map[(i, category)] = node_idx
-    #             node_idx += 1
-        
-    #     # Add hidden sink node
-    #     sink_idx = node_idx
-    #     node_labels.append("")
-        
-    #     # Create links and colors
-    #     sources = []
-    #     targets = []
-    #     values = []
-    #     link_colors = []
-        
-    #     colors = self._get_colorblind_palette(len(all_categories))
-    #     category_colors = {cat: colors[i] for i, cat in enumerate(all_categories)}
-        
-    #     # Create flows between subsets and handle shrinkage/growth
-    #     for i in range(len(self.parsers) - 1):
-    #         for category in all_categories:
-    #             source_count = all_data[i].get(category, 0)
-    #             target_count = all_data[i + 1].get(category, 0)
-                
-    #             # Visible flow to next subset
-    #             if target_count > 0:
-    #                 sources.append(node_map[(i, category)])
-    #                 targets.append(node_map[(i + 1, category)])
-    #                 values.append(target_count)
-    #                 link_colors.append(self._lighten_color(category_colors[category]))
-                
-    #             # Invisible flow to sink for items that disappear
-    #             if source_count > target_count:
-    #                 sources.append(node_map[(i, category)])
-    #                 targets.append(sink_idx)
-    #                 values.append(source_count - target_count)
-    #                 link_colors.append('rgba(0, 0, 0, 0)')
-        
-    #     # DO NOT send anything from the last column to the sink!
-    #     # The last column should just end without outflows
-        
-    #     # Assign colors to nodes
-    #     node_colors = []
-    #     for i, label in enumerate(self.labels):
-    #         for category in all_categories:
-    #             node_colors.append(category_colors[category])
-    #     node_colors.append('rgba(0, 0, 0, 0)')  # Sink invisible
-        
-    #     # Create positions
-    #     num_categories = len(all_categories)
-    #     y_positions = []
-    #     x_positions = []
-        
-    #     if num_categories == 1:
-    #         for i in range(len(self.labels)):
-    #             x_pos = i / (len(self.labels) - 1) if len(self.labels) > 1 else 0.5
-    #             y_positions.append(0.5)
-    #             x_positions.append(x_pos)
-    #     else:
-    #         for i in range(len(self.labels)):
-    #             x_pos = i / (len(self.labels) - 1) if len(self.labels) > 1 else 0.5
-    #             for j in range(num_categories):
-    #                 y_val = 0.1 + (j * 0.8 / (num_categories - 1))
-    #                 y_positions.append(y_val)
-    #                 x_positions.append(x_pos)
-        
-    #     # Sink position (way off-screen in both dimensions so it doesn't affect layout)
-    #     y_positions.append(10)  # Far below the visible area
-    #     x_positions.append(10)  # Far to the right of the visible area
-        
-    #     return node_labels, sources, targets, values, link_colors, node_colors, y_positions, x_positions
+    
     def _prepare_sankey_data(self, data_type: str = 'nodes', 
                          top_n: Optional[int] = None) -> Tuple:
         """
@@ -497,8 +382,8 @@ if __name__ == "__main__":
     output_aggr = base_path / "results/eda/snap/alluvial_aggr_2"
 
     # Create output directories if they don't exist
-    # output_prot.mkdir(parents=True, exist_ok=True)
-    # output_sub.mkdir(parents=True, exist_ok=True)
+    output_prot.mkdir(parents=True, exist_ok=True)
+    output_sub.mkdir(parents=True, exist_ok=True)
     output_aggr.mkdir(parents=True, exist_ok=True)
 
     # Define your files and labels
@@ -525,18 +410,18 @@ if __name__ == "__main__":
     
     # Create configurations for the three sets we want to plot
     sets = [
-        # {
-        #     'name': 'prototype',
-        #     'file_patterns': file_prot,
-        #     'labels': labels_prot,
-        #     'output_dir': output_prot,
-        # },
-        # {
-        #     'name': 'subset',
-        #     'file_patterns': file_sub,
-        #     'labels': labels_sub,
-        #     'output_dir': output_sub,
-        # },
+        {
+            'name': 'prototype',
+            'file_patterns': file_prot,
+            'labels': labels_prot,
+            'output_dir': output_prot,
+        },
+        {
+            'name': 'subset',
+            'file_patterns': file_sub,
+            'labels': labels_sub,
+            'output_dir': output_sub,
+        },
         {
             'name': 'aggregated',
             'file_patterns': file_aggr,

@@ -290,17 +290,41 @@ class PubMedBatchCache:
 
         return {row["pmid"]: dict(row) for row in cursor.fetchall()}
 
+    # def get_missing_pmids(self, pmids: list[str]) -> list[str]:
+    #     """Return PMIDs that aren't in the cache."""
+    #     if not pmids:
+    #         return []
+
+    #     placeholders = ",".join("?" * len(pmids))
+    #     cursor = self.conn.execute(
+    #         f"SELECT pmid FROM abstracts WHERE pmid IN ({placeholders})",
+    #         tuple(pmids),  # Convert to tuple
+    #     )
+    #     cached_pmids = {row["pmid"] for row in cursor.fetchall()}
+    #     return [pmid for pmid in pmids if pmid not in cached_pmids]
+    
     def get_missing_pmids(self, pmids: list[str]) -> list[str]:
         """Return PMIDs that aren't in the cache."""
         if not pmids:
             return []
-
-        placeholders = ",".join("?" * len(pmids))
-        cursor = self.conn.execute(
-            f"SELECT pmid FROM abstracts WHERE pmid IN ({placeholders})",
-            tuple(pmids),  # Convert to tuple
-        )
-        cached_pmids = {row["pmid"] for row in cursor.fetchall()}
+        
+        # SQLite has a limit of 999 variables per query
+        # Split into batches to avoid "too many SQL variables" error
+        BATCH_SIZE = 900  # Use 900 to be safe (limit is 999)
+        
+        cached_pmids = set()
+        
+        # Process in batches
+        for i in range(0, len(pmids), BATCH_SIZE):
+            batch = pmids[i:i + BATCH_SIZE]
+            placeholders = ",".join("?" * len(batch))
+            cursor = self.conn.execute(
+                f"SELECT pmid FROM abstracts WHERE pmid IN ({placeholders})",
+                tuple(batch),
+            )
+            cached_pmids.update(row["pmid"] for row in cursor.fetchall())
+        
+        # Return PMIDs not found in cache
         return [pmid for pmid in pmids if pmid not in cached_pmids]
 
     def close(self):

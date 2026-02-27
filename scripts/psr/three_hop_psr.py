@@ -12,6 +12,10 @@ from collections import defaultdict
 from contextlib import redirect_stdout
 from tqdm import tqdm
 import numpy as np
+from metapath_utils import (
+    group_paths_by_metapath, 
+    create_metapath_edge_attrs,
+)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from knowledge_graph import KnowledgeGraph, print_kg_stats
@@ -90,6 +94,32 @@ def has_confident_direct(kg, A, D, require_directed=True, require_known_sign=Tru
             return True
     return False
 
+# =============================================================================
+# PSR-specific aggregation functions
+# =============================================================================
+
+def aggregate_probabilities_psr(paths):
+    """
+    Aggregate probabilities using PSR formula: P = 1 - ∏(1 - p_i)
+    
+    For 3-hop: combines path probabilities where each is already p_AB × p_BC × p_CD
+    """
+    if not paths:
+        return 0.0
+    
+    probs = np.array([p['probability'] for p in paths], dtype=np.float64)
+    combined = 1.0 - np.prod(1.0 - probs)
+    return float(combined)
+
+
+def aggregate_evidence_scores(paths):
+    """
+    Aggregate evidence scores by summing across paths.
+    
+    For 3-hop: each path evidence = evidence_AB × evidence_BC × evidence_CD
+    Then sum across all paths in the metapath group.
+    """
+    return float(sum(p['evidence_score'] for p in paths))
 
 # -------------------------------
 # Core algorithm: 3-hop inference
@@ -103,6 +133,8 @@ def compute_three_hop_inference(
     skip_when_any_direct_exists=True,
     require_directed_for_skip=True,
     require_known_sign_for_skip=True,
+    grouping_strategy='mechanistic',
+    split_inconsistent_correlations=True,
 ):
     """
     Compute three-hop inferences A -> B -> C -> D for all paths in the graph.
@@ -200,105 +232,226 @@ def compute_three_hop_inference(
 
     # Compute inferred edges using PSR equations
     print("\nComputing inferred probabilities and scores...")
-    inferred_edges = {}
+    inferred_edges = {}  # Keyed by (A, D, metapath_sig) if grouping, else (A, D)
     skipped_paths = 0
 
-    for (A, D), intermediate_pairs in tqdm(three_hop_paths.items(), desc="Computing inferences"):
-        # If limiting intermediates, rank by product of evidence scores
+    for (A, D), intermediate_pairs in tqdm(three_hop_paths.items(), desc="Computing 3-hop inferences"):
+        
+        # =====================================================================
+        # Optional: Limit number of intermediate pairs to consider
+        # =====================================================================
         if max_intermediates and len(intermediate_pairs) > max_intermediates:
+            # Rank intermediate pairs by product of all three edge evidence scores
             scored = []
             for (B, C) in intermediate_pairs:
                 props_ab = get_edge_properties(kg, A, B)
                 props_bc = get_edge_properties(kg, B, C)
                 props_cd = get_edge_properties(kg, C, D)
                 if props_ab and props_bc and props_cd:
-                    scored.append((
-                        (B, C),
-                        props_ab['evidence_score'] * props_bc['evidence_score'] * props_cd['evidence_score']
-                    ))
+                    total_evidence = (props_ab['evidence_score'] * 
+                                    props_bc['evidence_score'] * 
+                                    props_cd['evidence_score'])
+                    scored.append(((B, C), total_evidence))
+            
+            # Keep only top N by evidence
             scored.sort(key=lambda x: -x[1])
             intermediate_pairs = [pair for pair, _ in scored[:max_intermediates]]
 
-        path_probabilities = []
-        path_evidence_scores = []
-        path_correlations = []
-        path_details = []
-
+        # =====================================================================
+        # Build structured path information for all paths A→B→C→D
+        # =====================================================================
+        all_paths = []
+        
         for (B, C) in intermediate_pairs:
+            # Get properties for all three edges
             props_ab = get_edge_properties(kg, A, B)
             props_bc = get_edge_properties(kg, B, C)
             props_cd = get_edge_properties(kg, C, D)
+            
+            # Skip if any edge is missing
             if props_ab is None or props_bc is None or props_cd is None:
                 continue
 
-            path_prob = props_ab['probability'] * props_bc['probability'] * props_cd['probability']
+            # Calculate path-level metrics (multiplicative across edges)
+            path_prob = (props_ab['probability'] * 
+                        props_bc['probability'] * 
+                        props_cd['probability'])
 
-            # Filter low-probability paths here
+            # Filter out very low-probability paths
             if path_prob < min_path_probability:
                 skipped_paths += 1
                 continue
 
-            path_evidence = props_ab['evidence_score'] * props_bc['evidence_score'] * props_cd['evidence_score']
-            path_correlation = props_ab['correlation_type'] * props_bc['correlation_type'] * props_cd['correlation_type']
+            path_evidence = (props_ab['evidence_score'] * 
+                           props_bc['evidence_score'] * 
+                           props_cd['evidence_score'])
+            
+            path_correlation = (props_ab['correlation_type'] * 
+                              props_bc['correlation_type'] * 
+                              props_cd['correlation_type'])
 
-            path_probabilities.append(path_prob)
-            path_evidence_scores.append(path_evidence)
-            path_correlations.append(path_correlation)
+            # Create structured path info dictionary
+            path_info = {
+                # The complete 4-node path
+                'path': [A, B, C, D],
+                
+                # Node types at each position (4 types for 3-hop)
+                'node_types': (
+                    node_type(kg, A), 
+                    node_type(kg, B), 
+                    node_type(kg, C), 
+                    node_type(kg, D)
+                ),
+                
+                # Relation types for the 3 edges
+                'relations': (
+                    props_ab['edge_type'], 
+                    props_bc['edge_type'], 
+                    props_cd['edge_type']
+                ),
+                
+                # Aggregated metrics for this path
+                'probability': path_prob,
+                'correlation': path_correlation,
+                'evidence_score': path_evidence,
+                
+                # Store edge properties for reference
+                'props_ab': props_ab,
+                'props_bc': props_bc,
+                'props_cd': props_cd,
+            }
+            
+            all_paths.append(path_info)
 
-            path_details.append({
-                'intermediate_B': node_name(kg, B),
-                'intermediate_B_type': node_type(kg, B),
-                'intermediate_C': node_name(kg, C),
-                'intermediate_C_type': node_type(kg, C),
-                'probability': round(float(path_prob), 6),
-                'evidence_score': round(float(path_evidence), 4),
-                'correlation_type': int(path_correlation),
-                'edge_ab_type': props_ab['edge_type'],
-                'edge_bc_type': props_bc['edge_type'],
-                'edge_cd_type': props_cd['edge_type'],
-                'n_supporting_ab': props_ab['n_supporting_edges'],
-                'n_supporting_bc': props_bc['n_supporting_edges'],
-                'n_supporting_cd': props_cd['n_supporting_edges'],
-            })
-
-        if not path_probabilities:
+        # Skip if no valid paths found
+        if not all_paths:
             continue
 
-        probs_array = np.array(path_probabilities, dtype=np.float64)
-        combined_prob = 1.0 - np.prod(1.0 - probs_array)
-        combined_evidence = float(sum(path_evidence_scores))
-
-        if combined_evidence > 0:
-            weighted_corr = sum(c * s for c, s in zip(path_correlations, path_evidence_scores)) / combined_evidence
-            if weighted_corr > 0.5:
-                combined_correlation = 1
-            elif weighted_corr < -0.5:
-                combined_correlation = -1
+        # =====================================================================
+        # BRANCHING: Legacy behavior vs Metapath grouping
+        # =====================================================================
+        
+        if grouping_strategy is None:
+            # -----------------------------------------------------------------
+            # Flat aggregation: combine all paths into a single inferred edge
+            # Creates single edge (A, D) with all paths combined
+            # -----------------------------------------------------------------
+            
+            probs_array = np.array([p['probability'] for p in all_paths], dtype=np.float64)
+            combined_prob = 1.0 - np.prod(1.0 - probs_array)
+            combined_evidence = float(sum(p['evidence_score'] for p in all_paths))
+            
+            # Calculate weighted correlation
+            if combined_evidence > 0:
+                weighted_corr = sum(
+                    p['correlation'] * p['evidence_score'] 
+                    for p in all_paths
+                ) / combined_evidence
+                
+                if weighted_corr > 0.5:
+                    combined_correlation = 1
+                elif weighted_corr < -0.5:
+                    combined_correlation = -1
+                else:
+                    combined_correlation = 0
             else:
                 combined_correlation = 0
+
+            # Create single aggregated edge
+            inferred_edges[(A, D)] = {
+                'source': node_name(kg, A),
+                'source_type': node_type(kg, A),
+                'target': node_name(kg, D),
+                'target_type': node_type(kg, D),
+                'probability': round(float(combined_prob), 6),
+                'evidence_score': round(float(combined_evidence), 4),
+                'correlation_type': int(combined_correlation),
+                'num_paths': len(all_paths),
+                'num_intermediate_pairs_tested': len(intermediate_pairs),
+                'kind': 'inferred_3_hop',
+                'aggregated': True,  # All paths aggregated together
+            }
+        
         else:
-            combined_correlation = 0
+            # Metapath grouping: one inferred edge per metapath signature
+            metapath_groups = group_paths_by_metapath(
+                all_paths,
+                strategy=grouping_strategy,
+                split_inconsistent_correlations=split_inconsistent_correlations
+            )
+            
+            # Create list of edge dicts, one per metapath
+            edge_list = []
+            
+            for metapath_sig, group_info in metapath_groups.items():
+                paths_in_group = group_info['paths']
+                was_split = group_info['was_split']
+                correlation = group_info['correlation']
+                
+                # Aggregate within this metapath using PSR formulas
+                combined_prob = aggregate_probabilities_psr(paths_in_group)
+                combined_evidence = aggregate_evidence_scores(paths_in_group)
+                
+                # Create comprehensive edge attributes
+                edge_attrs = create_metapath_edge_attrs(
+                    source=A,
+                    target=D,
+                    kg=kg,
+                    metapath_sig=metapath_sig,
+                    paths=paths_in_group,
+                    combined_prob=combined_prob,
+                    combined_evidence=combined_evidence,
+                    correlation=correlation,
+                    path_length=3,  # ← 3 for three-hop
+                    was_split=was_split,
+                    grouping_strategy=grouping_strategy
+                )
+                
+                # Add additional metadata for JSON output
+                edge_attrs['source'] = node_name(kg, A)
+                edge_attrs['source_type'] = node_type(kg, A)
+                edge_attrs['target'] = node_name(kg, D)
+                edge_attrs['target_type'] = node_type(kg, D)
+                edge_attrs['num_intermediate_pairs_tested'] = len(intermediate_pairs)
+                
+                edge_list.append(edge_attrs)
+            
+            # Store list
+            inferred_edges[(A, D)] = edge_list
 
-        inferred_edges[(A, D)] = {
-            'source': node_name(kg, A),
-            'source_type': node_type(kg, A),
-            'target': node_name(kg, D),
-            'target_type': node_type(kg, D),
-            'probability': round(float(combined_prob), 6),
-            'evidence_score': round(float(combined_evidence), 4),
-            'correlation_type': int(combined_correlation),
-            'num_paths': len(path_probabilities),
-            'num_intermediate_pairs_tested': len(intermediate_pairs),
-            'paths': sorted(path_details, key=lambda x: -x['evidence_score'])[:50],
-        }
-
-    print(f"\nInferred {len(inferred_edges):,} indirect associations")
+    # =========================================================================
+    # Statistics and reporting
+    # =========================================================================
+    
+    print(f"\nInferred {len(inferred_edges):,} indirect 3-hop associations")
     print(f"Skipped {skipped_paths:,} low-probability paths")
+    
+    if grouping_strategy is not None:
+        # Additional stats for metapath grouping
+        unique_pairs = len(inferred_edges)  # Already unique (A, D) pairs
+        
+        # Count total metapaths across all pairs
+        total_metapaths = sum(
+            len(edge_data) if isinstance(edge_data, list) else 1
+            for edge_data in inferred_edges.values()
+        )
+        
+        print(f"  Unique (source, target) pairs: {unique_pairs:,}")
+        print(f"  Total metapaths: {total_metapaths:,}")
+        print(f"  Average metapaths per pair: {total_metapaths/unique_pairs:.1f}")
 
     if inferred_edges:
-        probs = [e['probability'] for e in inferred_edges.values()]
-        scores = [e['evidence_score'] for e in inferred_edges.values()]
-        num_paths = [e['num_paths'] for e in inferred_edges.values()]
+        # Flatten: handle both dict and list formats
+        all_edges = []
+        for edge_data in inferred_edges.values():
+            if isinstance(edge_data, list):
+                all_edges.extend(edge_data)
+            else:
+                all_edges.append(edge_data)
+        
+        probs = [e['probability'] for e in all_edges]
+        scores = [e['evidence_score'] for e in all_edges]
+        num_paths = [e['num_paths'] for e in all_edges]
 
         print(f"\nInferred probability distribution:")
         print(f"  Min: {min(probs):.6f}, Max: {max(probs):.6f}, Mean: {np.mean(probs):.6f}")
@@ -319,46 +472,64 @@ def compute_three_hop_inference(
 # Create combined graph with inferred edges
 # -------------------------------
 
-def create_inferred_graph(kg, inferred_edges, min_probability=0.0, min_evidence=0.0):
+def create_inferred_graph(kg, inferred_edges, min_probability=0.1, min_evidence=1.0):
     """
-    Create new graph with both direct and inferred edges.
+    Create a new graph with both direct and inferred edges.
+    
+    Handles both formats:
+    - Legacy: inferred_edges[(A,C)] = {single edge dict}
+    - Metapath: inferred_edges[(A,C)] = [list of edge dicts]
+    
+    MultiDiGraph will automatically create parallel edges for multiple metapaths.
     """
     print(f"\n{'='*80}")
-    print("CREATING COMBINED GRAPH")
+    print("CREATING GRAPH WITH INFERRED EDGES")
     print(f"{'='*80}")
+    print(f"  Min probability: {min_probability}")
+    print(f"  Min evidence score: {min_evidence}")
 
-    # Copy original graph
-    inferred_kg = kg.copy()
+    inferred_kg = kg.__class__(schema=kg.schema)
 
-    # Count existing edges
-    direct_count = inferred_kg.number_of_edges()
-    print(f"Original edges: {direct_count:,}")
+    # Copy all nodes
+    for node in tqdm(kg.nodes(), desc="Adding nodes"):
+        inferred_kg.add_node(node, **kg.nodes[node])
+
+    # Copy all direct edges
+    direct_count = 0
+    for u, v, data in tqdm(kg.edges(data=True), desc="Adding direct edges"):
+        inferred_kg.add_edge(u, v, **data)
+        direct_count += 1
 
     # Add inferred edges
     added_count = 0
     filtered_count = 0
 
-    print(f"\nAdding inferred edges...")
-    print(f"Filters: min_probability={min_probability}, min_evidence={min_evidence}")
-
-    for (A, D), data in tqdm(inferred_edges.items(), desc="Adding edges"):
-        if data['probability'] >= min_probability and data['evidence_score'] >= min_evidence:
-            inferred_kg.add_edge(
-                A, D,
-                type='inferred_three_hop',
-                kind='inferred_three_hop',
-                probability=data['probability'],
-                evidence_score=data['evidence_score'],
-                correlation_type=data['correlation_type'],
-                direction='1',
-                num_paths=data['num_paths'],
-                aggregated=False,
-                inferred=True,
-                source='PSR_three_hop_inference',
-            )
-            added_count += 1
+    for (A, C), edge_data in tqdm(inferred_edges.items(), desc="Adding inferred edges"):
+        # Detect format: dict (legacy) or list (metapath)
+        if isinstance(edge_data, dict):
+            # Legacy format: single edge
+            edge_list = [edge_data]
+        elif isinstance(edge_data, list):
+            # Metapath format: multiple edges
+            edge_list = edge_data
         else:
-            filtered_count += 1
+            print(f"WARNING: Unexpected edge data type for ({A}, {C}): {type(edge_data)}")
+            continue
+        
+        # Add each edge (MultiDiGraph creates parallel edges automatically)
+        for data in edge_list:
+            if data['probability'] >= min_probability and data['evidence_score'] >= min_evidence:
+                # Remove metadata that shouldn't be edge attributes
+                edge_attrs = {
+                    k: v for k, v in data.items() 
+                    if k not in ['source', 'target', 'source_type', 'target_type']
+                }
+                
+                # Add edge - MultiDiGraph will create parallel edge if needed
+                inferred_kg.add_edge(A, C, **edge_attrs)
+                added_count += 1
+            else:
+                filtered_count += 1
 
     print(f"\nAdded {added_count:,} inferred edges")
     print(f"Filtered out {filtered_count:,} low-confidence inferences")
@@ -383,11 +554,23 @@ def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
     output_json = output_dir / f"{input_stem}_three_hop_inferred_edges.json"
 
     # Sort by probability and save top N
-    max_to_save = min(5000, len(inferred_edges))
-    inferred_list = []
-    for (A, D), data in sorted(inferred_edges.items(),
-                               key=lambda x: -x[1]['probability'])[:max_to_save]:
-        inferred_list.append(data)
+    # Flatten and sort all edges (handle both single dict and list formats)
+    all_edges_with_keys = []
+    for key, edge_data in inferred_edges.items():
+        if isinstance(edge_data, list):
+            # Multiple metapaths: add each edge dict separately
+            for edge_dict in edge_data:
+                all_edges_with_keys.append((key, edge_dict))
+        else:
+            # Single edge (legacy)
+            all_edges_with_keys.append((key, edge_data))
+
+    # Sort by probability (descending). Use .get to avoid KeyError if missing.
+    all_edges_with_keys.sort(key=lambda x: -float(x[1].get('probability', 0.0)))
+
+    # Take top N and extract just the edge dicts
+    max_to_save = min(5000, len(all_edges_with_keys))
+    inferred_list = [edge_dict for _, edge_dict in all_edges_with_keys[:max_to_save]]
 
     with open(output_json, 'w') as f:
         json.dump({
@@ -544,7 +727,7 @@ def main():
     input_dir = base_path / "graphs/subsets"
     input_graph = input_dir / "prototype_8_12_aggregated.pkl"
 
-    output_dir = input_dir / "inferred"
+    output_dir = input_dir / "inferred_metapath_mechanistic/"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Parameters
@@ -555,6 +738,10 @@ def main():
         skip_when_any_direct_exists=True,
         require_directed_for_skip=False, 
         require_known_sign_for_skip=False,
+
+        # Metapath grouping parameters
+        grouping_strategy='mechanistic',  # Options: 'mechanistic', 'semantic', or None
+        split_inconsistent_correlations=True,  # For mechanistic: split if correlations disagree
 
         # Thresholds for adding to final graph
         min_inference_probability=0.001,
@@ -581,6 +768,9 @@ def main():
         skip_when_any_direct_exists=params['skip_when_any_direct_exists'],
         require_directed_for_skip=params['require_directed_for_skip'],
         require_known_sign_for_skip=params['require_known_sign_for_skip'],
+        
+        grouping_strategy=params.get('grouping_strategy', None),
+        split_inconsistent_correlations=params.get('split_inconsistent_correlations', True),
     )
 
     if not inferred_edges:

@@ -12,6 +12,10 @@ from collections import defaultdict
 from contextlib import redirect_stdout
 from tqdm import tqdm
 import numpy as np
+from metapath_utils import (
+    group_paths_by_metapath, 
+    create_metapath_edge_attrs,
+)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from knowledge_graph import KnowledgeGraph, print_kg_stats
@@ -100,6 +104,47 @@ def has_confident_direct(kg, A, C, require_directed=True, require_known_sign=Tru
             return True
     return False
 
+# =============================================================================
+# PSR-specific aggregation functions
+# =============================================================================
+
+def aggregate_probabilities_psr(paths):
+    """
+    Aggregate probabilities using PSR formula: P = 1 - ∏(1 - p_i)
+    
+    This combines multiple paths within a metapath group.
+    
+    Args:
+        paths: List of path dicts, each with 'probability' key
+               (Each path probability is already calculated as product of edge probabilities)
+    
+    Returns:
+        Combined probability as float
+    """
+    if not paths:
+        return 0.0
+    
+    probs = np.array([p['probability'] for p in paths], dtype=np.float64)
+    combined = 1.0 - np.prod(1.0 - probs)
+    return float(combined)
+
+
+def aggregate_evidence_scores(paths):
+    """
+    Aggregate evidence scores by summing across paths.
+    
+    Note: Each path's evidence_score is already calculated multiplicatively
+    (product of edge evidence scores along that path). This function sums
+    those path-level evidence scores across all paths in the metapath group.
+    
+    Args:
+        paths: List of path dicts, each with 'evidence_score' key
+               (Each already calculated as: edge1_evidence × edge2_evidence)
+    
+    Returns:
+        Sum of path evidence scores
+    """
+    return float(sum(p['evidence_score'] for p in paths))
 
 # -------------------------------
 # Core algorithm
@@ -113,6 +158,8 @@ def compute_two_hop_inference(
     skip_when_any_direct_exists=True,
     require_directed_for_skip=True,
     require_known_sign_for_skip=True,
+    grouping_strategy='mechanistic',
+    split_inconsistent_correlations=True,
 ):
     """
     Compute two-hop inferences A -> Bj -> C for all paths in the graph.
@@ -188,9 +235,9 @@ def compute_two_hop_inference(
     total_paths = sum(len(interms) for interms in two_hop_paths.values())
     print(f"Total two-hop paths: {total_paths:,}")
 
-    # Compute inferred edges using PSR equations
+    # Compute inferred probabilities and scores
     print("\nComputing inferred probabilities and scores...")
-    inferred_edges = {}
+    inferred_edges = {}  # Now keyed by (A, C, metapath_sig) if grouping, else (A, C)
     skipped_paths = 0
 
     for (A, C), intermediates in tqdm(two_hop_paths.items(), desc="Computing inferences"):
@@ -205,11 +252,9 @@ def compute_two_hop_inference(
             scored.sort(key=lambda x: -x[1])
             intermediates = [b for b, _ in scored[:max_intermediates]]
 
-        path_probabilities = []
-        path_evidence_scores = []
-        path_correlations = []
-        path_details = []
-
+        # Build structured path information for each intermediate
+        all_paths = []
+        
         for Bj in intermediates:
             props_ab = get_edge_properties(kg, A, Bj)
             props_bc = get_edge_properties(kg, Bj, C)
@@ -218,7 +263,7 @@ def compute_two_hop_inference(
 
             path_prob = props_ab['probability'] * props_bc['probability']
 
-            # Filter low-probability paths here
+            # Filter low-probability paths
             if path_prob < min_path_probability:
                 skipped_paths += 1
                 continue
@@ -226,60 +271,117 @@ def compute_two_hop_inference(
             path_evidence = props_ab['evidence_score'] * props_bc['evidence_score']
             path_correlation = props_ab['correlation_type'] * props_bc['correlation_type']
 
-            path_probabilities.append(path_prob)
-            path_evidence_scores.append(path_evidence)
-            path_correlations.append(path_correlation)
+            # Create structured path info
+            path_info = {
+                'path': [A, Bj, C],
+                'node_types': (node_type(kg, A), node_type(kg, Bj), node_type(kg, C)),
+                'relations': (props_ab['edge_type'], props_bc['edge_type']),
+                'probability': path_prob,
+                'correlation': path_correlation,
+                'evidence_score': path_evidence,
+                'intermediate': Bj,
+                'props_ab': props_ab,
+                'props_bc': props_bc,
+            }
+            
+            all_paths.append(path_info)
 
-            path_details.append({
-                'intermediate': node_name(kg, Bj),
-                'intermediate_type': node_type(kg, Bj),
-                'probability': round(float(path_prob), 6),
-                'evidence_score': round(float(path_evidence), 4),
-                'correlation_type': int(path_correlation),
-                'edge_ab_type': props_ab['edge_type'],
-                'edge_bc_type': props_bc['edge_type'],
-                'n_supporting_ab': props_ab['n_supporting_edges'],
-                'n_supporting_bc': props_bc['n_supporting_edges'],
-            })
-
-        if not path_probabilities:
+        if not all_paths:
             continue
 
-        probs_array = np.array(path_probabilities, dtype=np.float64)
-        combined_prob = 1.0 - np.prod(1.0 - probs_array)
-        combined_evidence = float(sum(path_evidence_scores))
-
-        if combined_evidence > 0:
-            weighted_corr = sum(c * s for c, s in zip(path_correlations, path_evidence_scores)) / combined_evidence
-            if weighted_corr > 0.5:
-                combined_correlation = 1
-            elif weighted_corr < -0.5:
-                combined_correlation = -1
+        if grouping_strategy is None:
+            # Flat aggregation: combine all paths into a single inferred edge
+            probs_array = np.array([p['probability'] for p in all_paths], dtype=np.float64)
+            combined_prob = 1.0 - np.prod(1.0 - probs_array)
+            combined_evidence = float(sum(p['evidence_score'] for p in all_paths))
+            
+            # Calculate weighted correlation
+            if combined_evidence > 0:
+                weighted_corr = sum(p['correlation'] * p['evidence_score'] for p in all_paths) / combined_evidence
+                if weighted_corr > 0.5:
+                    combined_correlation = 1
+                elif weighted_corr < -0.5:
+                    combined_correlation = -1
+                else:
+                    combined_correlation = 0
             else:
                 combined_correlation = 0
+            
+            # Create single edge for this (A, C) pair
+            inferred_edges[(A, C)] = {
+                'source': node_name(kg, A),
+                'source_type': node_type(kg, A),
+                'target': node_name(kg, C),
+                'target_type': node_type(kg, C),
+                'probability': round(float(combined_prob), 6),
+                'evidence_score': round(float(combined_evidence), 4),
+                'correlation_type': int(combined_correlation),
+                'num_paths': len(all_paths),
+                'num_intermediates_tested': len(intermediates),
+            }
+        
         else:
-            combined_correlation = 0
-
-        inferred_edges[(A, C)] = {
-            'source': node_name(kg, A),
-            'source_type': node_type(kg, A),
-            'target': node_name(kg, C),
-            'target_type': node_type(kg, C),
-            'probability': round(float(combined_prob), 6),
-            'evidence_score': round(float(combined_evidence), 4),
-            'correlation_type': int(combined_correlation),
-            'num_paths': len(path_probabilities),
-            'num_intermediates_tested': len(intermediates),
-            'paths': sorted(path_details, key=lambda x: -x['evidence_score'])[:50],
-        }
+            # Metapath grouping: one inferred edge per metapath signature
+            metapath_groups = group_paths_by_metapath(
+                all_paths, 
+                strategy=grouping_strategy,
+                split_inconsistent_correlations=split_inconsistent_correlations
+            )
+            
+            # Create list of edge dicts, one per metapath
+            edge_list = []
+            
+            for metapath_sig, group_info in metapath_groups.items():
+                paths_in_group = group_info['paths']
+                was_split = group_info['was_split']
+                correlation = group_info['correlation']
+                
+                # Aggregate probabilities for this metapath
+                combined_prob = aggregate_probabilities_psr(paths_in_group)
+                combined_evidence = aggregate_evidence_scores(paths_in_group)
+                
+                # Create edge attributes
+                edge_attrs = create_metapath_edge_attrs(
+                    source=A,
+                    target=C,
+                    kg=kg,
+                    metapath_sig=metapath_sig,
+                    paths=paths_in_group,
+                    combined_prob=combined_prob,
+                    combined_evidence=combined_evidence,
+                    correlation=correlation,
+                    path_length=2,
+                    was_split=was_split,
+                    grouping_strategy=grouping_strategy
+                )
+                
+                # Add source/target names for JSON output
+                edge_attrs['source'] = node_name(kg, A)
+                edge_attrs['source_type'] = node_type(kg, A)
+                edge_attrs['target'] = node_name(kg, C)
+                edge_attrs['target_type'] = node_type(kg, C)
+                edge_attrs['num_intermediates_tested'] = len(intermediates)
+                
+                edge_list.append(edge_attrs)
+            
+            # Store list - key is just (A, C), no metapath_sig
+            inferred_edges[(A, C)] = edge_list
 
     print(f"\nInferred {len(inferred_edges):,} indirect associations")
     print(f"Skipped {skipped_paths:,} low-probability paths")
 
     if inferred_edges:
-        probs = [e['probability'] for e in inferred_edges.values()]
-        scores = [e['evidence_score'] for e in inferred_edges.values()]
-        num_paths = [e['num_paths'] for e in inferred_edges.values()]
+        # Flatten: handle both dict and list formats
+        all_edges = []
+        for edge_data in inferred_edges.values():
+            if isinstance(edge_data, list):
+                all_edges.extend(edge_data)
+            else:
+                all_edges.append(edge_data)
+        
+        probs = [e['probability'] for e in all_edges]
+        scores = [e['evidence_score'] for e in all_edges]
+        num_paths = [e['num_paths'] for e in all_edges]
 
         print(f"\nInferred probability distribution:")
         print(f"  Min: {min(probs):.6f}, Max: {max(probs):.6f}, Mean: {np.mean(probs):.6f}")
@@ -292,9 +394,17 @@ def compute_two_hop_inference(
         print(f"\nPaths per inference:")
         print(f"  Min: {min(num_paths)}, Max: {max(num_paths)}, Mean: {np.mean(num_paths):.1f}")
 
+        # Count correlation types across the flattened edge list (handles both
+        # legacy single-dict and metapath list formats)
         corr_counts = defaultdict(int)
-        for e in inferred_edges.values():
-            corr_counts[e['correlation_type']] += 1
+        for e in all_edges:
+            # Some generators use 'correlation_type', others may use 'correlation'
+            corr_type = e.get('correlation_type', e.get('correlation', 0))
+            try:
+                corr_counts[int(corr_type)] += 1
+            except Exception:
+                # Fallback: count as unknown (0)
+                corr_counts[0] += 1
         print(f"\nCorrelation type distribution:")
         total = len(inferred_edges)
         print(f"  Positive (+1): {corr_counts[1]:,} ({100*corr_counts[1]/total:.1f}%)")
@@ -306,8 +416,13 @@ def compute_two_hop_inference(
 
 def create_inferred_graph(kg, inferred_edges, min_probability=0.1, min_evidence=1.0):
     """
-    Create a new graph with both direct and inferred edges, thresholded by
-    min_probability & min_evidence on the aggregated inference.
+    Create a new graph with both direct and inferred edges.
+    
+    Handles both formats:
+    - Legacy: inferred_edges[(A,C)] = {single edge dict}
+    - Metapath: inferred_edges[(A,C)] = [list of edge dicts]
+    
+    MultiDiGraph will automatically create parallel edges for multiple metapaths.
     """
     print(f"\n{'='*80}")
     print("CREATING GRAPH WITH INFERRED EDGES")
@@ -317,36 +432,46 @@ def create_inferred_graph(kg, inferred_edges, min_probability=0.1, min_evidence=
 
     inferred_kg = kg.__class__(schema=kg.schema)
 
+    # Copy all nodes
     for node in tqdm(kg.nodes(), desc="Adding nodes"):
         inferred_kg.add_node(node, **kg.nodes[node])
 
+    # Copy all direct edges
     direct_count = 0
     for u, v, data in tqdm(kg.edges(data=True), desc="Adding direct edges"):
         inferred_kg.add_edge(u, v, **data)
         direct_count += 1
 
+    # Add inferred edges
     added_count = 0
     filtered_count = 0
 
-    for (A, C), data in tqdm(inferred_edges.items(), desc="Adding inferred edges"):
-        if data['probability'] >= min_probability and data['evidence_score'] >= min_evidence:
-            inferred_kg.add_edge(
-                A, C,
-                type='inferred_two_hop',
-                kind='inferred_two_hop',
-                probability=data['probability'],
-                evidence_score=data['evidence_score'],
-                correlation_type=data['correlation_type'],
-                direction='1',  # Inferred edges are directed A->C
-                num_paths=data['num_paths'],
-                num_intermediates=data['num_intermediates_tested'],
-                aggregated=False,
-                inferred=True,
-                source='PSR_inference',
-            )
-            added_count += 1
+    for (A, C), edge_data in tqdm(inferred_edges.items(), desc="Adding inferred edges"):
+        # Detect format: dict (legacy) or list (metapath)
+        if isinstance(edge_data, dict):
+            # Legacy format: single edge
+            edge_list = [edge_data]
+        elif isinstance(edge_data, list):
+            # Metapath format: multiple edges
+            edge_list = edge_data
         else:
-            filtered_count += 1
+            print(f"WARNING: Unexpected edge data type for ({A}, {C}): {type(edge_data)}")
+            continue
+        
+        # Add each edge (MultiDiGraph creates parallel edges automatically)
+        for data in edge_list:
+            if data['probability'] >= min_probability and data['evidence_score'] >= min_evidence:
+                # Remove metadata that shouldn't be edge attributes
+                edge_attrs = {
+                    k: v for k, v in data.items() 
+                    if k not in ['source', 'target', 'source_type', 'target_type']
+                }
+                
+                # Add edge - MultiDiGraph will create parallel edge if needed
+                inferred_kg.add_edge(A, C, **edge_attrs)
+                added_count += 1
+            else:
+                filtered_count += 1
 
     print(f"\nAdded {added_count:,} inferred edges")
     print(f"Filtered out {filtered_count:,} low-confidence inferences")
@@ -362,16 +487,36 @@ def create_inferred_graph(kg, inferred_edges, min_probability=0.1, min_evidence=
 def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
     """Save outputs with consistent, truthful metadata."""
     input_stem = input_path.stem
+    # Add metapath/grouping info to output filenames for clarity
+    grouping = params.get('grouping_strategy')
+    split_flag = params.get('split_inconsistent_correlations', False)
+    grouping_part = grouping if grouping else "no_grouping"
+    split_part = "split" if split_flag else "nosplit"
+    # sanitize stem (avoid spaces or problematic chars in filenames)
+    safe_stem = input_stem.replace(" ", "_")
+    input_set = f"{safe_stem}_metapath_{grouping_part}_{split_part}"
 
     print(f"\nSaving inferred edges...")
-    output_json = output_dir / f"{input_stem}_inferred_edges.json"
+    output_json = output_dir / f"{input_set}_inferred_edges.json"
 
-    # Sort by probability and save top N (cap for convenience)
-    max_to_save = min(5000, len(inferred_edges))
-    inferred_list = []
-    for (A, C), data in sorted(inferred_edges.items(),
-                               key=lambda x: -x[1]['probability'])[:max_to_save]:
-        inferred_list.append(data)
+    ## Sort by probability and save top N
+    # Flatten and sort all edges (handle both single dict and list formats)
+    all_edges_with_keys = []
+    for key, edge_data in inferred_edges.items():
+        if isinstance(edge_data, list):
+            # Multiple metapaths: add each edge dict separately
+            for edge_dict in edge_data:
+                all_edges_with_keys.append((key, edge_dict))
+        else:
+            # Single edge (legacy)
+            all_edges_with_keys.append((key, edge_data))
+
+    # Sort by probability (descending). Use .get to avoid KeyError if missing.
+    all_edges_with_keys.sort(key=lambda x: -float(x[1].get('probability', 0.0)))
+
+    # Take top N and extract just the edge dicts
+    max_to_save = min(5000, len(all_edges_with_keys))
+    inferred_list = [edge_dict for _, edge_dict in all_edges_with_keys[:max_to_save]]
 
     with open(output_json, 'w') as f:
         json.dump({
@@ -386,7 +531,7 @@ def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
     print(f"Saved top {len(inferred_list):,} inferences to JSON")
 
     # Save combined graph
-    output_pkl = output_dir / f"{input_stem}_with_inferred.pkl"
+    output_pkl = output_dir / f"{input_set}_with_inferred.pkl"
     print(f"\nSaving combined graph...")
     inferred_kg.export_graph(output_pkl)
 
@@ -394,11 +539,11 @@ def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
     info_dir = output_dir.parent.parent / "info"
     info_dir.mkdir(parents=True, exist_ok=True)
 
-    schema_file = info_dir / f"{input_stem}_with_inferred_schema.txt"
+    schema_file = info_dir / f"{input_set}_with_inferred_schema.txt"
     with open(schema_file, 'w') as f:
         f.write(str(inferred_kg.schema))
 
-    stats_file = info_dir / f"{input_stem}_with_inferred_stats.txt"
+    stats_file = info_dir / f"{input_set}_with_inferred_stats.txt"
     with open(stats_file, 'w') as f:
         with redirect_stdout(f):
             print_kg_stats(inferred_kg)
@@ -409,13 +554,13 @@ def save_outputs(inferred_kg, inferred_edges, input_path, output_dir, params):
         viz_dir = output_dir.parent.parent / "results" / "graph_viz"
         viz_dir.mkdir(parents=True, exist_ok=True)
 
-        output_html = viz_dir / f"{input_stem}_with_inferred.html"
+        output_html = viz_dir / f"{input_set}_with_inferred.html"
         inferred_kg.visualize(
             str(output_html),
-            title=f"{input_stem.replace('_', ' ').title()} + Inferred"
+            title=f"{input_set.replace('_', ' ').title()} + Inferred"
         )
 
-        output_png = viz_dir / f"{input_stem}_with_inferred.png"
+        output_png = viz_dir / f"{input_set}_with_inferred.png"
         inferred_kg.visualize(
             str(output_png),
             figsize=(20, 15),
@@ -444,7 +589,7 @@ def main():
     # input_dir = base_path / "graphs/subsets/ikraph"
     # input_graph = input_dir / "adipose_inflammation_snn_expanded.pkl"
 
-    output_dir = input_dir / "inferred"
+    output_dir = input_dir / "inferred_metapath_mechanistic/"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Parameters (kept in one dict and threaded everywhere)
@@ -455,6 +600,10 @@ def main():
         skip_when_any_direct_exists=True,  # skip if confident direct A->C exists
         require_directed_for_skip=False, # only skip if direct edge is directed, so directed = '0' won't block
         require_known_sign_for_skip=False,
+
+        # Metapath grouping parameters
+        grouping_strategy='mechanistic',  # Options: 'mechanistic', 'semantic', or None
+        split_inconsistent_correlations=True,  # For mechanistic: split if correlations disagree
 
         # thresholds for adding inferred edges into final graph
         min_inference_probability=0.0,
@@ -487,11 +636,13 @@ def main():
         skip_when_any_direct_exists=params['skip_when_any_direct_exists'],
         require_directed_for_skip=params['require_directed_for_skip'],
         require_known_sign_for_skip=params['require_known_sign_for_skip'],
+        grouping_strategy=params.get('grouping_strategy', None),
+        split_inconsistent_correlations=params.get('split_inconsistent_correlations', True),
     )
 
     if not inferred_edges:
         print("\nNo inferences found. This could mean:")
-        print("  - All possible indirect paths already have confident direct edges)")
+        print("  - All possible indirect paths already have confident direct edges")
         print("  - No valid two-hop paths with probability >= min_path_probability")
         print("  - Edge probabilities missing/low and filtered out")
         return
@@ -522,7 +673,18 @@ def main():
 
     print(f"\nInference results:")
     print(f"  Potential inferences found: {len(inferred_edges):,}")
-    print(f"  Inferences above threshold: {sum(1 for e in inferred_edges.values() if e['probability'] >= params['min_inference_probability'] and e['evidence_score'] >= params['min_inference_evidence']):,}")
+    # Count inferences above threshold
+    count_above_threshold = 0
+    for edge_data in inferred_edges.values():
+        if isinstance(edge_data, list):
+            for e in edge_data:
+                if e['probability'] >= params['min_inference_probability'] and e['evidence_score'] >= params['min_inference_evidence']:
+                    count_above_threshold += 1
+        else:
+            if edge_data['probability'] >= params['min_inference_probability'] and edge_data['evidence_score'] >= params['min_inference_evidence']:
+                count_above_threshold += 1
+
+    print(f"  Inferences above threshold: {count_above_threshold:,}")
 
     print(f"\nCombined graph:")
     print(f"  Nodes: {inferred_kg.number_of_nodes():,}")

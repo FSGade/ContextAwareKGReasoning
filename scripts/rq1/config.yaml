@@ -1,0 +1,114 @@
+# RQ1: Does Tissue Context Matter?
+# Configuration for tissue-stratified PSR analysis
+
+# Paths (adjust to your environment)
+paths:
+  base: /home/projects2/ContextAwareKGReasoning
+  input_graph: /home/projects2/ContextAwareKGReasoning/data/graphs/augmented_graph_normalized.pkl
+  output_dir: /home/projects2/ContextAwareKGReasoning/results/rq1_tissue_context_3
+  scripts_dir: /home/projects2/ContextAwareKGReasoning/ContextAwareKGReasoning/scripts/rq1
+
+# Tissue context definitions
+contexts:
+  baseline:
+    description: "All edges with tissue annotation (excluding 'Not specified')"
+    filter: "tissue is not None and tissue != 'Not specified'"
+  adipose:
+    description: "Adipose tissue only"
+    filter: "tissue == 'Adipose Tissue'"
+  nonadipose:
+    description: "All tissues except adipose (excluding 'Not specified')"
+    filter: "tissue not in (None, 'Not specified', 'Adipose Tissue')"
+  liver:
+    description: "Liver tissue only"
+    filter: "tissue == 'Liver'"
+
+# PSR parameters
+psr_params:
+  max_intermediates: null  # No limit
+  min_path_probability: 0.001
+  consider_undirected: false  # We expand undirected edges during preprocessing
+  skip_when_any_direct_exists: true
+  require_directed_for_skip: false
+  require_known_sign_for_skip: false
+  min_inference_probability: 0.0
+  min_inference_evidence: 0.0
+  # Constrain intermediates to Gene nodes for Gene→Gene→Disease paths
+  require_gene_intermediates: true
+
+  # Metapath grouping: when enabled, results are grouped by mechanistic path type
+  # e.g., Gene-[regulates]->Gene-[associated_with]->Disease
+  # Creates multiple results per (gene, disease) pair, one per mechanism
+  use_metapath_grouping: true
+  grouping_strategy: mechanistic  # 'mechanistic' (by relation types) or 'semantic' (by correlation)
+  split_inconsistent_correlations: true  # Split metapaths with conflicting correlations
+
+# Analysis parameters
+analysis:
+  # Jaccard overlap k values
+  jaccard_k_values: [50, 100, 250, 500]
+  
+  # Tissue-exclusive thresholds
+  tissue_exclusive:
+    top_k_tissue: 100  # Gene must be in top-k of tissue context
+    not_in_top_m_baseline: 500  # Gene must NOT be in top-m of baseline
+  
+  # Tiebreakers (in order)
+  tiebreakers:
+    - field: path_probability
+      ascending: false
+    - field: evidence_score
+      ascending: false
+    - field: num_intermediates
+      ascending: false  # More intermediates = more robust
+    - field: source_gene
+      ascending: true   # Alphabetical (deterministic)
+
+  # Disease focus for reports
+  # Can use names (substring match) or exact IDs
+  disease_focus:
+    - inflammation
+    - obesity
+    - insulin resistance
+    - "Diabetes Mellitus, Type 2"
+  
+  # Optional: exact disease node IDs for precise matching
+  # Uncomment and fill in with actual IDs from your graph for more accurate filtering
+  # disease_ids:
+  #   inflammation: ["MESH:D007249"]
+  #   obesity: ["MESH:D009765"]
+  #   type_2_diabetes: ["MESH:D003924"]
+
+# Slurm job configuration
+slurm:
+  partition: null  # Use default
+  
+  filter_job:
+    cpus: 1
+    memory: 80G
+    time: "02:00:00"
+  
+  psr_2hop_job:
+    cpus: 4
+    memory: 80G
+    time: "03:00:00"
+  
+  psr_3hop_job:
+    cpus: 4
+    memory: 120G
+    time: "03:00:00"
+  
+  aggregate_job:
+    cpus: 1
+    memory: 100G
+    time: "03:00:00"
+  
+  compare_job:
+    cpus: 1
+    memory: 16G
+    time: "01:00:00"
+  
+  report_job:
+    cpus: 1
+    memory: 20G
+    time: "01:00:00"

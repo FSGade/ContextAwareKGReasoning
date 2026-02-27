@@ -32,6 +32,11 @@ T2D_SPECIFICATION_FILTER = "AND (diabetes OR metabolism)"
 GENERAL_SPECIFICATION_FILTER = 'AND ("protein" OR "gene" OR "pathway" OR "metabolite" OR "chemical" OR "phenotype")'
 
 
+("inflammation") AND ("adipose tissue" OR "adipocyte" OR "fat tissue" OR "white adipose tissue" OR "brown adipose tissue" OR "subcutaneous fat" OR "visceral fat" OR "adipogenesis" OR "browning" OR "beiging") AND ("obesity" OR "diabetes" OR "metabolic syndrome") AND (2000:2023[edat]) NOT ("Review"[Publication Type])
+
+("inflammation") AND ("adipose tissue" OR "adipocyte" OR "fat tissue" OR "white adipose tissue" OR "brown adipose tissue" OR "subcutaneous fat" OR "visceral fat" OR "adipogenesis" OR "browning" OR "beiging") AND ("obesity" OR "diabetes" OR "metabolic syndrome") AND (2000:2023[edat]) AND "journal article"[pt] NOT (preprint[pt] OR review[pt] OR editorial[pt] OR "clinical trial protocol"[pt] OR "systematic review"[pt] OR "meta-analysis"[pt] OR "letter"[pt] OR "comment"[pt])'
+
+
 def search_keyphrase(
     keyphrase,
     key_index,

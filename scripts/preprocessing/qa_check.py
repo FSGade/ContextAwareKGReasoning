@@ -11,6 +11,7 @@ from pathlib import Path
 from collections import defaultdict
 import json
 import sys
+import traceback
 from tqdm import tqdm
 
 from knowledge_graph import KnowledgeGraph
@@ -291,6 +292,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"\nError: {e}")
-        import traceback
         traceback.print_exc()
         sys.exit(1)

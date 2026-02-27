@@ -1,0 +1,166 @@
+# RQ2: Does Detailed Tissue Context Matter?
+# Configuration for tissue coverage-aware PSR analysis
+#
+# SETUP: Update 'base' under paths: to your project root before running.
+
+# Paths — all derived from 'base'
+paths:
+  base: /home/projects2/ContextAwareKGReasoning  # <-- UPDATE THIS
+  input_graph: /home/projects2/ContextAwareKGReasoning/data/graphs/augmented_graph_with_topics.pkl
+  output_dir: /home/projects2/ContextAwareKGReasoning/results/rq2_detailed_tissue_final
+  scripts_dir: /home/projects2/ContextAwareKGReasoning/ContextAwareKGReasoning/scripts/rq2_final
+  lda_output_dir: /home/projects2/ContextAwareKGReasoning/results/lda_output_fit_final
+
+# Node types to exclude from graph
+exclude_node_types:
+  - "DNAMutation"
+  - "Species"
+
+# Tissue comparisons
+comparisons:
+  - name: "subcut_vs_visceral"
+    tissue_A: "subcutaneous"
+    tissue_B: "visceral"
+    description: "Subcutaneous vs Visceral adipose depot location"
+  - name: "white_vs_brown"
+    tissue_A: "white"
+    tissue_B: "brown"
+    description: "White vs Brown adipose type (strict matching)"
+
+# NOTE: Tissue group definitions live in tissue_mapping.py (canonical source).
+# The config below is kept for reference but tissue_mapping.py is authoritative.
+tissue_groups:
+  subcutaneous:
+    exact_matches:
+      - "Subcutaneous Adipose Tissue"
+      - "Subcutaneous Abdominal Adipose Tissue"
+      - "Subcutaneous White Adipose Tissue"
+    list_component_matches:
+      - "Subcutaneous Adipose Tissue"
+    description: "Subcutaneous adipose depot (strict)"
+  visceral:
+    exact_matches:
+      - "Visceral Adipose Tissue"
+      - "Visceral White Adipose Tissue"
+    list_component_matches:
+      - "Visceral Adipose Tissue"
+    description: "Visceral adipose depot (strict)"
+  white:
+    exact_matches:
+      - "White Adipose Tissue"
+    list_component_matches:
+      - "White Adipose Tissue"
+    description: "White adipose tissue (strict)"
+  brown:
+    exact_matches:
+      - "Brown Adipose Tissue"
+    list_component_matches:
+      - "Brown Adipose Tissue"
+    description: "Brown adipose tissue (strict)"
+
+# PSR parameters
+psr_params:
+  max_intermediates: null
+  min_path_probability: 0.001
+  consider_undirected: false
+  skip_when_any_direct_exists: true
+  require_directed_for_skip: false
+  require_known_sign_for_skip: false
+  require_gene_intermediates: false  # Unlike RQ1: allows all metapaths
+  target_types: ["Disease"]
+  use_metapath_grouping: true
+  grouping_strategy: mechanistic
+  split_inconsistent_correlations: true
+  min_inference_probability: 0.0
+  min_inference_evidence: 0.0
+
+# Coverage propagation
+coverage:
+  propagation_method: "geometric_mean"
+  epsilon: 0.01
+
+# Aggregation: tiebreaker order when multiple edge types exist
+aggregation:
+  tiebreaker_order:
+    - field: probability
+      ascending: false
+    - field: coverage
+      ascending: false
+    - field: evidence_score
+      ascending: false
+
+# Analysis parameters
+analysis:
+  jaccard_k_values: [50, 100, 250, 500, 1000, 5000, 10000, 50000, 100000]
+  tissue_specific:
+    diff_coverage_threshold: 0.3
+    high_diff_threshold: 0.5
+  rank_by:
+    - probability
+    - evidence_score
+    - diff_coverage
+
+# Enrichment (over-representation analysis)
+enrichment:
+  fdr_threshold: 0.05
+  min_topic_count: 5
+  top_n_in_summary: 20
+
+# Permutation testing
+# Strategy: per-triple empirical p-values. Shuffle detailed_tissue labels on
+# raw edges (keeping structure/probabilities fixed), recompute coverage.
+# p = (# perms with |null diff| >= |observed diff| + 1) / (N + 1)
+# BH FDR correction for q-values.
+permutation:
+  n_permutations: 10000
+  perms_per_job: 100     # 100 perms per graph load → 100 jobs per comparison
+  max_concurrent_jobs: 10
+  filter_before_save: true
+  min_coverage_both: 0.0
+  focus_phenotypes:
+    - 'Obesity'
+    - 'Insulin Resistance'
+    - 'Inflammation'
+  hops_for_permutation: [2, 3]
+  alpha: 0.05
+
+# Slurm job configuration
+slurm:
+  partition: null
+  preprocess_job:    { cpus: 1, memory: 64G,  time: "00:30:00" }
+  aggregate_job:     { cpus: 1, memory: 80G,  time: "00:30:00" }
+  psr_2hop_job:      { cpus: 4, memory: 80G,  time: "01:00:00" }
+  psr_3hop_job:      { cpus: 4, memory: 80G,  time: "04:00:00" }
+  compare_job:       { cpus: 1, memory: 32G,  time: "00:30:00" }
+  enrichment_job:    { cpus: 4, memory: 60G,  time: "12:00:00" }
+  permutation_job:   { cpus: 1, memory: 48G,  time: "48:00:00" }
+  permutation_aggregate_job: { cpus: 1, memory: 32G, time: "10:00:00" }
+  report_job:        { cpus: 1, memory: 20G,  time: "00:30:00" }
+  visualization_job: { cpus: 1, memory: 16G,  time: "00:30:00" }
+
+# Report parameters
+report:
+  target_display_name: "Phenotype"
+  columns:
+    - source_gene
+    - target_phenotype
+    - metapath
+    - probability
+    - evidence_score
+    - coverage_A
+    - coverage_B
+    - diff_coverage
+    - log2_ratio
+    - perm_pvalue
+    - perm_qvalue
+    - correlation_type
+    - num_intermediates
+    - relationship_types
+    - intermediate_genes
+  default_top_k: 500
+  filters:
+    - { field: target_phenotype, type: dropdown }
+    - { field: metapath,         type: dropdown }
+    - { field: diff_coverage,    type: range, min: -1.0, max: 1.0 }
+    - { field: probability,      type: range, min: 0.0,  max: 1.0 }
+    - { field: perm_qvalue,      type: range, min: 0.0,  max: 1.0 }

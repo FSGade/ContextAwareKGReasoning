@@ -2,6 +2,7 @@
 
 import sys
 import csv
+import re
 from pathlib import Path
 from collections import defaultdict
 from tqdm import tqdm
@@ -12,7 +13,6 @@ from knowledge_graph import KnowledgeGraph
 
 def search_nodes(kg, node_type, keywords, exact_match=False):
     """Search for nodes by keywords in specific node type."""
-    import re
     matches = []
     
     for node in kg.nodes():
