@@ -194,8 +194,6 @@ See [LICENSE](LICENSE) for details.
 
 ## References
 
-- Zhang, Y. *et al.* (2025). A comprehensive, large-scale biomedical knowledge graph for AI-powered data-driven biomedical research. *Nature Machine Intelligence*. 
-
 - Y. Zhang et al., “A comprehensive large-scale biomedical knowledge graph for AI-powered data-driven biomedical research,” Nat Mach Intell, vol. 7, no. 4, pp. 602–614, Mar. 2025, doi: [10.1038/s42256-025-01014-w](https://doi.org/10.1038/s42256-025-01014-w).
 
 - G. Adomavicius, B. Mobasher, F. Ricci, and A. Tuzhilin, “Context-Aware Recommender Systems,” AI Magazine, vol. 32, no. 3, pp. 67–80, 2011, doi: [10.1609/aimag.v32i3.2364](https://doi.org/10.1609/aimag.v32i3.2364).
